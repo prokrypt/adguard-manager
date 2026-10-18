@@ -1,0 +1,1002 @@
+#!/usr/bin/env python3
+"""adguard-manager: curses front end for the AdGuard Home query log.
+
+Keys are function keys: F2 custom rules manager, F3 filter by client, F4 ignore a domain, F5 refresh,
+F6 block/unblock, F7 ignored list, F8 auto-refresh interval, F9 log out, F10 quit.
+Typing filters the list (domain, client name or IP); Esc clears it.
+The session cookie (never the password), the ignore list and the client
+filter are kept in ~/.config/adguard-manager, mode 600. That file is written
+at login, and on exit if the ignore list or client filter changed or you
+logged out.
+"""
+import curses
+import json
+import os
+import sys
+import textwrap
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                    "adguard-manager")
+DEFAULT_URL = "http://adguard.lan"
+COOKIE_NAME = "agh_session"
+TIMEOUT = 10
+LOG_LIMIT = 500      # first load: a screenful at once, the rest in pages between keys
+FIRST_PAGES = (20, 100)  # page sizes for the first load (the last one repeats)
+DETAIL_ROWS = 8      # details pane below the list (plus its separator line); grows for long entries
+AUTO = (5, 10, 30, 0)    # F8 cycles the auto-refresh interval in seconds (0 = off)
+PAGES = (20, 100, 500)  # refresh page sizes: small first, bigger only for a long gap
+KEEP = 5000          # entries kept in memory per view
+
+
+class AuthError(Exception):
+    pass
+
+
+class Api:
+    def __init__(self, url, cookie=None):
+        self.url = url.rstrip("/")
+        self.cookie = cookie
+
+    def request(self, path, data=None):
+        body = None if data is None else json.dumps(data).encode()
+        req = urllib.request.Request(self.url + path, data=body)
+        if body is not None:
+            req.add_header("Content-Type", "application/json")
+        if self.cookie:
+            req.add_header("Cookie", self.cookie)
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                raw = resp.read()
+                return resp, (json.loads(raw) if raw.strip().startswith((b"{", b"[")) else None)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise AuthError(e.read().decode(errors="replace").strip() or e.reason)
+            if e.code == 429:  # AdGuard locks the IP out after failed logins
+                raise RuntimeError("Too many failed logins, "
+                                   + e.read().decode(errors="replace").strip().removeprefix("auth: "))
+            raise RuntimeError(f"HTTP {e.code}: {e.read().decode(errors='replace').strip() or e.reason}")
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"{self.url}: {e.reason}")
+        except TimeoutError:
+            raise RuntimeError(f"{self.url}: timed out after {TIMEOUT}s")
+
+    def login(self, name, password):
+        resp, _ = self.request("/control/login", {"name": name, "password": password})
+        for header in resp.headers.get_all("Set-Cookie") or []:
+            pair = header.split(";", 1)[0].strip()
+            if pair.startswith(COOKIE_NAME + "="):
+                self.cookie = pair
+                return
+        raise AuthError("login answered without a session cookie")
+
+    def logout(self):
+        try:
+            self.request("/control/logout")
+        except (AuthError, RuntimeError):
+            pass
+        self.cookie = None
+
+    def status(self):
+        return self.request("/control/status")[1]
+
+    def querylog(self, limit=LOG_LIMIT, search="", older_than=""):
+        """Newest first; returns (entries, oldest timestamp for the next page)."""
+        q = {"limit": limit}
+        if search:
+            q["search"] = search
+        if older_than:
+            q["older_than"] = older_than
+        got = self.request(f"/control/querylog?{urllib.parse.urlencode(q)}")[1] or {}
+        return got.get("data") or [], got.get("oldest", "")
+
+    def user_rules(self):
+        return (self.request("/control/filtering/status")[1] or {}).get("user_rules") or []
+
+    def filter_names(self):
+        """filter list id -> name (0 is the custom rules)."""
+        got = self.request("/control/filtering/status")[1] or {}
+        names = {0: "Custom filtering rules"}
+        for f in (got.get("filters") or []) + (got.get("whitelist_filters") or []):
+            names[f.get("id")] = f.get("name") or f.get("url", "")
+        return names
+
+    def set_user_rules(self, rules):
+        self.request("/control/filtering/set_rules", {"rules": rules})
+
+    def check_host(self, name):
+        q = urllib.parse.urlencode({"name": name})
+        return self.request(f"/control/filtering/check_host?{q}")[1] or {}
+
+
+def load_conf():
+    try:
+        with open(CONF) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_conf(conf):
+    # One write, created 600 so the cookie is never readable by others.
+    fd = os.open(CONF, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(conf, f)
+
+
+# ---------- curses helpers ----------
+
+def addstr(win, y, x, text, attr=0):
+    h, w = win.getmaxyx()
+    if y < 0 or y >= h or x >= w:
+        return
+    text = text[: w - x - (1 if y == h - 1 else 0)]
+    try:
+        win.addstr(y, x, text, attr)
+    except curses.error:
+        pass
+
+
+def footer(win, keys, msg=""):
+    h, w = win.getmaxyx()
+    win.move(h - 1, 0)
+    win.clrtoeol()
+    x = 0
+    if sum(len(k) + len(l) + 1 for k, l in keys) > w - 16:  # keep room for the message
+        keys = [(k, l[:4]) for k, l in keys]
+    for key, label in keys:
+        addstr(win, h - 1, x, key, curses.A_BOLD)
+        x += len(key)
+        addstr(win, h - 1, x, label, curses.A_REVERSE)
+        x += len(label) + 1
+    if msg:
+        addstr(win, h - 1, max(x + 1, w - len(msg) - 1), msg)
+
+
+class Field:
+    def __init__(self, label, value="", secret=False):
+        self.label, self.value, self.secret = label, value, secret
+        self.pos = len(value)
+
+    def key(self, k):
+        if k in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+            if self.pos:
+                self.value = self.value[: self.pos - 1] + self.value[self.pos:]
+                self.pos -= 1
+        elif k == curses.KEY_DC:
+            self.value = self.value[: self.pos] + self.value[self.pos + 1:]
+        elif k == curses.KEY_LEFT:
+            self.pos = max(0, self.pos - 1)
+        elif k == curses.KEY_RIGHT:
+            self.pos = min(len(self.value), self.pos + 1)
+        elif k in (curses.KEY_HOME, "\x01"):
+            self.pos = 0
+        elif k in (curses.KEY_END, "\x05"):
+            self.pos = len(self.value)
+        elif k == "\x15":  # ^U clears
+            self.value, self.pos = "", 0
+        elif isinstance(k, str) and k.isprintable():
+            self.value = self.value[: self.pos] + k + self.value[self.pos:]
+            self.pos += 1
+
+
+def login_form(scr, url, name="", error=""):
+    """Returns (url, name, password) or None if the user quit."""
+    fields = [Field("Server", url), Field("Username", name), Field("Password", secret=True)]
+    cur = next(i for i, f in enumerate(fields) if not f.value)
+    curses.curs_set(1)
+    while True:
+        scr.erase()
+        h, w = scr.getmaxyx()
+        top = max(0, h // 2 - 5)
+        left = max(0, w // 2 - 30)
+        addstr(scr, top, left, "AdGuard Home login", curses.A_BOLD)
+        addstr(scr, top + 1, left, "Only the session cookie is saved, not the password.", curses.A_DIM)
+        for i, f in enumerate(fields):
+            shown = "*" * len(f.value) if f.secret else f.value
+            addstr(scr, top + 3 + i, left, f"{f.label:>9}: ")
+            addstr(scr, top + 3 + i, left + 11, shown.ljust(40), curses.A_UNDERLINE)
+        if error:
+            addstr(scr, top + 7, left, error, curses.color_pair(1) | curses.A_BOLD)
+        footer(scr, [("Enter", "Next/Log in"), ("Tab", "Field"), ("F10", "Quit")])
+        f = fields[cur]
+        scr.move(top + 3 + cur, min(w - 1, left + 11 + f.pos))
+        k = scr.get_wch()
+        if k in (curses.KEY_F10, "\x1b"):
+            return None
+        if k == curses.KEY_RESIZE:
+            continue
+        if k in ("\t", curses.KEY_DOWN):
+            cur = (cur + 1) % len(fields)
+        elif k in (curses.KEY_BTAB, curses.KEY_UP):
+            cur = (cur - 1) % len(fields)
+        elif k in ("\n", "\r", curses.KEY_ENTER):
+            if cur < len(fields) - 1:
+                cur += 1
+            elif all(x.value for x in fields):
+                curses.curs_set(0)
+                return fields[0].value.strip(), fields[1].value, fields[2].value
+            else:
+                error = "Fill in all three fields."
+                cur = next(i for i, x in enumerate(fields) if not x.value)
+        else:
+            f.key(k)
+
+
+def authenticate(scr, conf):
+    """Make sure we hold a working session; returns an Api or None (quit)."""
+    api = Api(conf.get("url", DEFAULT_URL), conf.get("cookie"))
+    name = error = ""
+    try:
+        api.status()
+        return api
+    except AuthError:
+        if api.cookie:
+            error = "Saved session expired, please log in again."
+    except RuntimeError as e:
+        error = str(e)
+    while True:
+        got = login_form(scr, api.url, name, error)
+        if got is None:
+            return None
+        url, name, password = got
+        api = Api(url)
+        message(scr, f"Logging in to {api.url}…")
+        try:
+            api.login(name, password)
+            api.status()
+        except AuthError as e:
+            error = f"Login failed: {e}"
+            continue
+        except RuntimeError as e:
+            error = str(e)
+            continue
+        conf.update(url=api.url, cookie=api.cookie)
+        save_conf(conf)
+        return api
+
+
+def message(scr, text):
+    scr.erase()
+    h, w = scr.getmaxyx()
+    addstr(scr, h // 2, max(0, (w - len(text)) // 2), text)
+    scr.refresh()
+
+
+def choose(scr, title, items, hint="Type to filter  Enter: choose  Esc/F10: cancel"):
+    """Popup list; returns the chosen index into items, or None."""
+    try:
+        return _choose(scr, title, items, hint)
+    finally:
+        scr.touchwin()  # repaint what the popup covered
+
+
+def _choose(scr, title, items, hint):
+    sel = top = 0
+    typed = ""
+    while True:
+        shown = [i for i, item in enumerate(items) if typed.lower() in item.lower()]
+        sel = min(sel, max(0, len(shown) - 1))
+        h, w = scr.getmaxyx()
+        bw = min(w - 2, max(len(title), len(hint), *(len(i) for i in items)) + 6)
+        bh = min(h - 2, len(items) + 4)
+        win = curses.newwin(bh, bw, (h - bh) // 2, (w - bw) // 2)
+        win.keypad(True)
+        win.box()
+        addstr(win, 0, 2, f" {title} "[: bw - 3], curses.A_BOLD)
+        addstr(win, bh - 1, 2, f" {hint} "[: bw - 3], curses.A_DIM)
+        if typed:
+            addstr(win, 1, 2, f"filter: {typed}"[: bw - 4], curses.A_BOLD)
+        body = bh - 4
+        top = min(max(top, sel - body + 1), sel)
+        for row, i in enumerate(shown[top: top + body]):
+            attr = curses.A_REVERSE if top + row == sel else 0
+            addstr(win, 2 + row, 2, items[i][: bw - 4].ljust(bw - 4), attr)
+        win.refresh()
+        k = win.get_wch()
+        last = max(0, len(shown) - 1)
+        if k == "\x1b" and typed:
+            typed = ""
+        elif k in (curses.KEY_F10, "\x1b"):
+            return None
+        elif k in ("\n", "\r", curses.KEY_ENTER):
+            if shown:
+                return shown[sel]
+        elif k in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+            typed = typed[:-1]
+        elif isinstance(k, str) and k.isprintable():
+            typed += k
+            sel = top = 0
+        elif k == curses.KEY_UP:
+            sel = max(0, sel - 1)
+        elif k == curses.KEY_DOWN:
+            sel = min(last, sel + 1)
+        elif k == curses.KEY_PPAGE:
+            sel = max(0, sel - body)
+        elif k == curses.KEY_NPAGE:
+            sel = min(last, sel + body)
+        elif k == curses.KEY_HOME:
+            sel = 0
+        elif k == curses.KEY_END:
+            sel = last
+        elif k == curses.KEY_RESIZE:
+            scr.erase()
+            scr.refresh()
+
+
+def ask(scr, title, value=""):
+    """One-line input popup; returns the text or None if cancelled."""
+    f = Field("", value)
+    curses.curs_set(1)
+    try:
+        while True:
+            h, w = scr.getmaxyx()
+            bw = min(w - 2, max(60, len(title) + 6, len(value) + 6))
+            win = curses.newwin(5, bw, (h - 5) // 2, (w - bw) // 2)
+            win.keypad(True)
+            win.box()
+            addstr(win, 0, 2, f" {title} "[: bw - 3], curses.A_BOLD)
+            addstr(win, 4, 2, " Enter: OK  Esc/F10: cancel "[: bw - 3], curses.A_DIM)
+            width = bw - 4
+            start = max(0, f.pos - width + 1)  # scroll long text so the cursor stays visible
+            addstr(win, 2, 2, f.value[start: start + width].ljust(width), curses.A_UNDERLINE)
+            win.move(2, 2 + f.pos - start)
+            k = win.get_wch()
+            if k in (curses.KEY_F10, "\x1b"):
+                return None
+            if k in ("\n", "\r", curses.KEY_ENTER):
+                return f.value
+            if k != curses.KEY_RESIZE:
+                f.key(k)
+    finally:
+        curses.curs_set(0)
+        scr.touchwin()
+
+
+def confirm(scr, question):
+    return choose(scr, question, ["No", "Yes"], "Enter: choose  Esc/F10: cancel") == 1
+
+
+# ---------- custom rules view ----------
+
+class RulesView:
+    """AdGuard's custom filtering rules in stored order (new rules are appended, so oldest first)."""
+
+    KEYS = [("F2", "Back"), ("F4", "Edit"), ("F5", "Reload"), ("F7", "Add"), ("F8", "Delete"), ("F10", "Back")]
+
+    def __init__(self, scr, api):
+        self.scr, self.api = scr, api
+        self.rules, self.rows, self.typed, self.msg = [], [], "", ""
+        self.top = self.sel = 0
+        self.body = 1
+
+    def load(self):
+        self.rules = self.api.user_rules()
+        self.apply(jump_end=True)
+
+    def apply(self, keep=None, jump_end=False):
+        """rows = (index, rule) pairs matching the typed filter."""
+        t = self.typed.lower()
+        self.rows = [(i, r) for i, r in enumerate(self.rules) if t in r.lower()]
+        if jump_end:
+            self.sel = max(0, len(self.rows) - 1)
+        elif keep is not None:
+            self.sel = next((n for n, (i, _) in enumerate(self.rows) if i >= keep), len(self.rows) - 1)
+        self.sel = max(0, min(self.sel, len(self.rows) - 1))
+        self.msg = f"{len(self.rows)} of {len(self.rules)} rules" if self.typed else f"{len(self.rules)} rules"
+
+    def current(self):
+        return self.rows[self.sel] if self.rows else None
+
+    def draw(self):
+        scr = self.scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        head = " #     Custom filtering rules (oldest first)"
+        if self.typed:
+            head = head.ljust(max(len(head), w - len(self.typed) - 10)) + f"  filter: {self.typed}"
+        addstr(scr, 0, 0, head.ljust(w), curses.A_REVERSE | curses.A_BOLD)
+        body = self.body = max(1, h - 2)
+        if self.sel < self.top:
+            self.top = self.sel
+        elif self.sel >= self.top + body:
+            self.top = self.sel - body + 1
+        for row, (i, r) in enumerate(self.rows[self.top: self.top + body]):
+            s = r.strip()
+            attr = (curses.A_DIM if s.startswith("#") or s.startswith("!") else
+                    curses.color_pair(2) if s.startswith("@@") else 0)
+            if self.top + row == self.sel:
+                attr |= curses.A_REVERSE
+            addstr(scr, 1 + row, 0, f"{i + 1:>5}  {r}".ljust(w), attr)
+        footer(scr, self.KEYS, self.msg)
+        scr.refresh()
+
+    def change(self, what, fn):
+        """Re-read the rules, let fn edit the fresh list, save it.
+
+        fn gets (rules, index of the selected rule in them or None) and returns a message.
+        Reading first keeps edits made meanwhile in the web interface."""
+        cur = self.current()
+        rules = self.api.user_rules()
+        at = None
+        if cur:
+            i, text = cur
+            at = i if i < len(rules) and rules[i] == text else next(
+                (n for n, r in enumerate(rules) if r == text), None)
+        if cur and at is None and what != "add":
+            self.rules = rules
+            self.apply()
+            self.msg = "That rule changed on the server; reloaded"
+            return
+        msg = fn(rules, at)
+        if msg is None:
+            return
+        self.api.set_user_rules(rules)
+        self.rules = rules
+        self.apply(keep=at if what != "add" else None, jump_end=what == "add")
+        self.msg = msg
+
+    def edit(self):
+        cur = self.current()
+        if not cur:
+            return
+        new = ask(self.scr, f"Edit rule {cur[0] + 1}", cur[1])
+        if new is None or new == cur[1]:
+            return
+
+        def fn(rules, at):
+            rules[at] = new
+            return f"Rule {at + 1} changed"
+        self.change("edit", fn)
+
+    def add(self):
+        new = ask(self.scr, "Add rule (goes at the end)")
+        if not new or not new.strip():
+            return
+
+        def fn(rules, at):
+            if new.strip() in (r.strip() for r in rules):
+                self.msg = f"{new.strip()} is already there"
+                return None
+            rules.append(new.strip())
+            return f"Added {new.strip()}"
+        if self.typed and self.typed.lower() not in new.lower():
+            self.typed = ""  # make sure the new rule is visible
+        self.change("add", fn)
+
+    def delete(self):
+        cur = self.current()
+        if not cur or not confirm(self.scr, f"Delete rule {cur[0] + 1}: {cur[1]}?"):
+            return
+
+        def fn(rules, at):
+            gone = rules.pop(at)
+            return f"Deleted {gone}"
+        self.change("delete", fn)
+
+    def run(self):
+        self.scr.timeout(-1)
+        try:
+            self.load()
+        except RuntimeError as e:
+            self.msg = str(e)
+        actions = {curses.KEY_F4: self.edit, curses.KEY_F5: self.load,
+                   curses.KEY_F7: self.add, curses.KEY_F8: self.delete}
+        while True:
+            self.draw()
+            k = self.scr.get_wch()
+            last = max(0, len(self.rows) - 1)
+            if k in (curses.KEY_F10, curses.KEY_F2):
+                return
+            if k in actions:
+                try:
+                    actions[k]()
+                except RuntimeError as e:
+                    self.msg = str(e)
+            elif k in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+                self.typed = self.typed[:-1]
+                self.apply(keep=self.current()[0] if self.current() else None)
+            elif k == "\x1b":
+                self.typed = ""
+                self.apply(keep=self.current()[0] if self.current() else None)
+            elif isinstance(k, str) and k.isprintable():
+                self.typed += k
+                self.apply(jump_end=True)
+            elif k == curses.KEY_UP:
+                self.sel = max(0, self.sel - 1)
+            elif k == curses.KEY_DOWN:
+                self.sel = min(last, self.sel + 1)
+            elif k == curses.KEY_PPAGE:
+                self.sel = max(0, self.sel - self.body)
+            elif k == curses.KEY_NPAGE:
+                self.sel = min(last, self.sel + self.body)
+            elif k == curses.KEY_HOME:
+                self.sel = 0
+            elif k == curses.KEY_END:
+                self.sel = last
+
+
+# ---------- query log view ----------
+
+def verdict(entry):
+    reason = entry.get("reason", "")
+    if reason.startswith("Rewrite"):
+        return "REWR", 3
+    if reason.startswith("NotFilteredWhite") or reason.startswith("NotFilteredAllow"):
+        return "ALLOW", 2
+    if reason.startswith("Filtered"):
+        return "BLOCK", 1
+    return "", 0
+
+
+def client_name(entry):
+    info = entry.get("client_info") or {}
+    return info.get("name") or entry.get("client", "")
+
+
+def qname(entry):
+    return ((entry.get("question") or {}).get("name") or "").lower().rstrip(".")
+
+
+def levels(name):
+    """ads.x.example.com -> [ads.x.example.com, x.example.com, example.com]"""
+    parts = name.split(".")
+    return [".".join(parts[i:]) for i in range(max(1, len(parts) - 1))]
+
+
+def covers(domain, name):
+    return name == domain or name.endswith("." + domain)
+
+
+def key(entry):
+    q = entry.get("question") or {}
+    return entry.get("time"), entry.get("client"), q.get("name"), q.get("type")
+
+
+def fetch_new(api, search, known):
+    """Entries newer than the list we already have, fetching as little as possible.
+
+    The API can only page backwards from the newest entry, so ask for a small
+    page and stop at the first entry we already hold; longer gaps take bigger pages.
+    Returns (new entries, complete); complete=False means the gap was too long
+    and the result should replace the list."""
+    have = {key(e) for e in known[:50]}
+    new, older = [], ""
+    for limit in PAGES + (PAGES[-1],) * (KEEP // PAGES[-1]):
+        page, older = api.querylog(limit, search, older)
+        for e in page:
+            if key(e) in have:
+                return new, True
+            new.append(e)
+        if not page or not older:
+            return new, True
+    return new, False
+
+
+class LogView:
+    def __init__(self, scr, api, conf):
+        self.scr, self.api, self.conf = scr, api, conf
+        self.rows, self.top, self.sel, self.msg = [], 0, 0, ""
+        # (ip, label) while filtering by client; remembered in conf, saved on exit
+        self.client = tuple(conf["client"]) if conf.get("client") else None
+        self.typed = ""     # type-to-filter text: matches domain, client name or IP
+        self.body = 1       # list rows on screen, set by draw()
+        self.lists = {}     # filter list id -> name, for the details pane
+        self.more = {}      # search string -> older_than cursor while the first load continues
+        self.auto = AUTO[0]
+        self.last = 0.0     # time of the last refresh
+        self.cache = {}     # search string -> entries, so switching views only fetches the gap
+
+    @property
+    def search(self):
+        return self.client[0] if self.client else ""
+
+    @property
+    def all(self):
+        return self.cache.get(self.search, [])
+
+    @property
+    def ignore(self):
+        return self.conf.setdefault("ignore", [])
+
+    def type_key(self, k):
+        """Type-to-filter in the main list; returns False if k isn't a typing key."""
+        if k in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+            self.typed = self.typed[:-1]
+        elif k == "\x1b":
+            self.typed = ""
+        elif isinstance(k, str) and k.isprintable():
+            self.typed += k
+        else:
+            return False
+        self.apply(self.current(), jump=True)
+        return True
+
+    def keys(self):
+        cur = self.current()
+        block = "Unblock" if cur and verdict(cur)[0] == "BLOCK" else "Block"
+        return [("F2", "Rules"), ("F3", "All clients" if self.client else "Client"), ("F4", "Ignore"),
+                ("F5", "Refresh"), ("F6", block), ("F7", "Ignored"),
+                ("F8", f"Auto {self.auto}s" if self.auto else "Auto off"), ("F9", "Logout"), ("F10", "Quit")]
+
+    def current(self):
+        return self.rows[self.sel] if self.rows else None
+
+    def matches(self, e):
+        t = self.typed.lower()
+        return (t in qname(e) or t in client_name(e).lower() or t in e.get("client", ""))
+
+    def apply(self, keep=None, jump=False):
+        """Rebuild the visible rows; keep the entry `keep` selected if it is still shown.
+
+        jump=True puts the selection straight on `keep` (filter changed);
+        otherwise new rows came in on top and the view shifts with them."""
+        ip = self.client[0] if self.client else None
+        old = len(self.rows)
+        self.rows = [e for e in self.all
+                     if (ip is None or e.get("client") == ip)
+                     and not any(covers(d, qname(e)) for d in self.ignore)
+                     and (not self.typed or self.matches(e))]
+        if jump:
+            self.sel = self.rows.index(keep) if keep is not None and keep in self.rows else 0
+        elif keep is not None and keep in self.rows:
+            # New rows came in on top: stay on the same entry, unless we were at the top.
+            added = self.rows.index(keep) - self.sel
+            if self.sel:
+                self.sel += added
+                self.top += added
+        elif keep is None and old == 0:
+            self.sel = self.top = 0
+        self.sel = min(self.sel, max(0, len(self.rows) - 1))
+        hidden = sum(1 for e in self.all if any(covers(d, qname(e)) for d in self.ignore))
+        self.msg = f"{len(self.rows)} shown" + (f", {hidden} ignored" if hidden else "")
+
+    def refresh(self, auto=False):
+        self.last = time.monotonic()
+        if not self.all:
+            self.first_load()
+            return
+        if not auto:
+            self.msg = "Loading…"
+            self.draw()
+        keep, msg = self.current(), self.msg
+        # The server's search also matches domains, so apply() narrows it to the client.
+        new, complete = fetch_new(self.api, self.search, self.all)
+        self.cache[self.search] = (new + self.all if complete else new)[:KEEP]
+        if not complete:
+            self.more.pop(self.search, None)
+        self.apply(keep)
+        if auto and not new:
+            self.msg = msg  # a quiet auto refresh leaves the status line alone
+        else:
+            self.msg = f"{len(new)} new; " + self.msg
+
+    def first_load(self):
+        """First page only: enough to fill the screen. load_more() fetches the rest."""
+        page, older = self.api.querylog(FIRST_PAGES[0], self.search)
+        self.cache[self.search] = page
+        self.more[self.search] = older if len(page) == FIRST_PAGES[0] and older else None
+        self.apply()
+
+    def load_more(self):
+        """One more page of the first load, run while no key is waiting."""
+        try:
+            limit = FIRST_PAGES[-1]  # full pages: whatever comes back is kept, even past LOG_LIMIT
+            page, older = self.api.querylog(limit, self.search, self.more[self.search])
+        except RuntimeError:
+            self.more[self.search] = None
+            raise
+        rows = self.all + page
+        self.cache[self.search] = rows
+        done = len(page) < limit or not older or len(rows) >= LOG_LIMIT
+        self.more[self.search] = None if done else older
+        self.apply(self.current())
+        if not done:
+            self.msg = f"loading {len(rows)}/{LOG_LIMIT}… " + self.msg
+
+    def wait_ms(self):
+        """How long the key wait may block before the next background job."""
+        if self.more.get(self.search):
+            return 0
+        if not self.auto:
+            return -1
+        return max(0, int((self.last + self.auto - time.monotonic()) * 1000))
+
+    def idle(self):
+        try:
+            if self.more.get(self.search):
+                self.load_more()
+            else:
+                self.refresh(auto=True)
+        except RuntimeError as e:
+            self.msg = str(e)
+            self.last = time.monotonic()  # retry after a full interval, not in a tight loop
+
+    def cycle_auto(self):
+        self.auto = AUTO[(AUTO.index(self.auto) + 1) % len(AUTO)]
+        self.last = time.monotonic()
+        self.msg = f"Auto refresh every {self.auto}s" if self.auto else "Auto refresh off"
+
+    def draw(self):
+        scr = self.scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        cw = 20
+        head = f"{'Time':8} {'Client':{cw}} {'Type':5} {'Status':6} Domain"
+        tags = (f"  client: {self.client[1]}" if self.client else "") + \
+               (f"  filter: {self.typed}" if self.typed else "")
+        if tags:
+            head = head.ljust(max(len(head), w - len(tags))) + tags
+        addstr(scr, 0, 0, head.ljust(w), curses.A_REVERSE | curses.A_BOLD)
+        # Details pane: DETAIL_ROWS lines, more when the wrapped entry needs them,
+        # never leaving the list under 5 rows (dropped entirely if even DETAIL_ROWS won't fit).
+        cur = self.current()
+        lines = []
+        for label, text, attr in self.details(cur) if cur else []:
+            for i, part in enumerate(textwrap.wrap(text, max(10, w - 10), break_on_hyphens=False) or [""]):
+                lines.append((label if i == 0 else "", part.replace("\xa0", " "), attr))
+        room = h - 2 - 1 - 5
+        dh = min(max(DETAIL_ROWS, len(lines)), room) + 1 if room >= DETAIL_ROWS else 0
+        body = self.body = max(1, h - 2 - dh)
+        if self.sel < self.top:
+            self.top = self.sel
+        elif self.sel >= self.top + body:
+            self.top = self.sel - body + 1
+        for i, e in enumerate(self.rows[self.top: self.top + body]):
+            q = e.get("question") or {}
+            label, color = verdict(e)
+            line = (f"{e.get('time', '')[11:19]:8} {client_name(e)[:cw]:{cw}} "
+                    f"{q.get('type', '')[:5]:5} {label:6} {q.get('name', '')}")
+            attr = curses.color_pair(color)
+            if self.top + i == self.sel:
+                attr |= curses.A_REVERSE
+            addstr(scr, 1 + i, 0, line.ljust(w), attr)
+        if dh:
+            addstr(scr, 1 + body, 0, " Details ".center(w, "─"), curses.A_BOLD)
+            for i, (label, text, attr) in enumerate(lines[: dh - 1]):
+                addstr(scr, 2 + body + i, 0, f"{label:>9} ", curses.A_DIM)
+                addstr(scr, 2 + body + i, 10, text, attr)
+        footer(scr, self.keys(), self.msg)
+        scr.refresh()
+
+    def details(self, e):
+        """(label, text, attr) lines describing one log entry."""
+        q = e.get("question") or {}
+        label, color = verdict(e)
+        info = e.get("client_info") or {}
+        client = e.get("client", "")
+        if info.get("name"):
+            client = f"{info['name']} ({client})"
+        if e.get("client_proto"):
+            client += f" via {e['client_proto'].upper()}"
+        out = [("Time", e.get("time", "").replace("T", " "), 0),
+               ("Client", client, 0),
+               ("Query", f"{q.get('name', '')}  {q.get('type', '')} {q.get('class', '')}", curses.A_BOLD),
+               ("Result", e.get("reason", "") + (f"  ({e['service_name']})" if e.get("service_name") else "")
+                + ("  (now, after F6; F6 again undoes)" if e.get("f6") else ""),
+                curses.color_pair(color) | curses.A_BOLD)]
+        if e.get("f6"):
+            was = [r.get("text", "") for r in e.get("was_rules") or []]
+            out.append(("Was", f"{e['was_reason']}  {', '.join(was)}  (at query time)", 0))
+            out.append(("Note", "'now' is AdGuard's check by name only; rules that match"
+                        " answer IPs aren't applied there", curses.A_DIM))
+        for r in e.get("rules") or []:
+            name = self.lists.get(r.get("filter_list_id"), f"list {r.get('filter_list_id')}")
+            out.append(("Rule", f"{r.get('text', '')}  [{name}]", 0))
+        answers = [f"{a.get('type', '')}\xa0{a.get('value', '')}\xa0ttl\xa0{a.get('ttl', '')}s"
+                   for a in e.get("answer") or []]
+        out.append(("Response", e.get("status", "") + (": " if answers else "") + ", ".join(answers), 0))
+        if e.get("original_answer"):
+            orig = [f"{a.get('type', '')}\xa0{a.get('value', '')}" for a in e["original_answer"]]
+            out.append(("Original", ", ".join(orig), 0))
+        via = e.get("upstream") or ("cache" if e.get("cached") else "none")
+        out.append(("Upstream", f"{via}  {float(e.get('elapsedMs') or 0):.1f}ms"
+                    + ("  cached" if e.get("cached") and e.get("upstream") else ""), 0))
+        return out
+
+    def pick_client(self):
+        if self.client:
+            self.client = None
+            self.conf.pop("client", None)
+            self.rows, self.sel, self.top = [], 0, 0
+            self.refresh()
+            return
+        counts = {}
+        for e in self.all:
+            ip = e.get("client", "")
+            label, n = counts.get(ip, (client_name(e), 0))
+            counts[ip] = (label, n + 1)
+        if not counts:
+            self.msg = "No clients in the log"
+            return
+        clients = sorted(counts.items(), key=lambda c: -c[1][1])
+        items = [f"{label}{f' ({ip})' if label != ip else ''}  {n}" for ip, (label, n) in clients]
+        i = choose(self.scr, "Show only client", items)
+        if i is not None:
+            ip, (label, _) = clients[i]
+            self.client = (ip, label)
+            self.conf["client"] = [ip, label]
+            self.rows, self.sel, self.top = [], 0, 0
+            self.refresh()
+
+    def pick_level(self, title, name, what):
+        opts = levels(name)
+        i = choose(self.scr, title, [f"{d}{what}" for d in opts])
+        return None if i is None else opts[i]
+
+    def ignore_current(self):
+        cur = self.current()
+        if not cur:
+            return
+        d = self.pick_level("Ignore", qname(cur), " and its subdomains")
+        if d and d not in self.ignore:
+            self.ignore.append(d)
+            self.apply(self.current())
+            self.msg = f"Ignoring {d}; " + self.msg
+
+    def edit_ignored(self):
+        while self.ignore:
+            i = choose(self.scr, "Ignored domains", sorted(self.ignore),
+                       "Enter: stop ignoring  Esc/F10: back")
+            if i is None:
+                break
+            self.ignore.remove(sorted(self.ignore)[i])
+        self.apply(self.current())
+        if not self.ignore:
+            self.msg = "Nothing ignored; " + self.msg
+
+    def toggle_block(self):
+        """Block or unblock the selected query; F6 again on the same row undoes it."""
+        cur = self.current()
+        if not cur:
+            return
+        if cur.get("f6"):
+            self.undo_block(cur)
+            return
+        name = qname(cur)
+        unblock = verdict(cur)[0] == "BLOCK"
+        d = self.pick_level("Unblock" if unblock else "Block", name, " and its subdomains")
+        if not d:
+            return
+        block, allow = f"||{d}^", f"@@||{d}^"
+        # First drop our own opposite rule; only if AdGuard still disagrees, add a new one.
+        drop, add = (block, allow) if unblock else (allow, block)
+        rules = self.api.user_rules()
+        ops = []
+        need_add = True
+        if drop in (r.strip() for r in rules):
+            i = next(i for i, r in enumerate(rules) if r.strip() == drop)
+            ops.append(("del", rules.pop(i), i))
+            self.api.set_user_rules(rules)
+            # AdGuard's check is by name only, so a row blocked by some other rule
+            # (e.g. an answer-IP rule) still needs the allow rule even if the check says fine.
+            others = [r.get("text") for r in cur.get("rules") or [] if r.get("text") != drop]
+            need_add = (verdict(self.api.check_host(name))[0] == "BLOCK") == unblock or (unblock and others)
+        if need_add and add not in (r.strip() for r in rules):
+            rules.append(add)
+            ops.append(("add", add, len(rules) - 1))
+            self.api.set_user_rules(rules)
+        if not ops:
+            self.msg = f"No change: {add} is already there"
+            return
+        check = self.api.check_host(name)
+        for key in ("reason", "rules", "service_name"):
+            cur.setdefault("was_" + key, cur.get(key, "" if key != "rules" else []))
+        cur["reason"] = check.get("reason", "")
+        cur["rules"] = check.get("rules") or []
+        cur["service_name"] = check.get("service_name", "")
+        cur["f6"] = ops
+        done = "; ".join(("Removed " if op == "del" else "Added ") + r for op, r, _ in ops)
+        self.msg = f"{done}; {name} is now {verdict(check)[0] or 'not blocked'} (F6 again undoes)"
+
+    def undo_block(self, cur):
+        """Reverse the rule edits F6 made on this row and show its original status again."""
+        rules = self.api.user_rules()
+        undone = []
+        for op, rule, i in reversed(cur.pop("f6")):
+            if op == "add":
+                rules = [r for r in rules if r.strip() != rule]
+                undone.append("removed " + rule)
+            elif rule.strip() not in (r.strip() for r in rules):
+                rules.insert(min(i, len(rules)), rule)  # back where it was
+                undone.append("restored " + rule)
+        self.api.set_user_rules(rules)
+        for key in ("reason", "rules", "service_name"):
+            cur[key] = cur.pop("was_" + key)
+        self.msg = "Undone: " + "; ".join(undone)
+
+    def rules_view(self):
+        RulesView(self.scr, self.api).run()
+        self.last = time.monotonic()  # auto refresh paused meanwhile; don't fire straight away
+
+    def run(self):
+        """Returns "quit" or "logout"."""
+        try:
+            return self.loop()
+        finally:
+            self.scr.timeout(-1)  # the login form expects blocking reads
+
+    def loop(self):
+        try:
+            self.lists = self.api.filter_names()
+            self.refresh()
+        except RuntimeError as e:
+            self.msg = str(e)
+        actions = {curses.KEY_F2: self.rules_view, curses.KEY_F3: self.pick_client, curses.KEY_F4: self.ignore_current,
+                   curses.KEY_F5: self.refresh, curses.KEY_F6: self.toggle_block,
+                   curses.KEY_F7: self.edit_ignored, curses.KEY_F8: self.cycle_auto}
+        while True:
+            self.draw()
+            self.scr.timeout(self.wait_ms())
+            try:
+                k = self.scr.get_wch()
+            except curses.error:  # no key before the timeout
+                self.idle()
+                continue
+            page = self.body
+            last = max(0, len(self.rows) - 1)
+            if k == curses.KEY_F10:
+                return "quit"
+            if k == curses.KEY_F9:
+                return "logout"
+            if k in actions:
+                try:
+                    actions[k]()
+                except RuntimeError as e:
+                    self.msg = str(e)
+            elif self.type_key(k):
+                pass
+            elif k == curses.KEY_UP:
+                self.sel = max(0, self.sel - 1)
+            elif k == curses.KEY_DOWN:
+                self.sel = min(last, self.sel + 1)
+            elif k == curses.KEY_PPAGE:
+                self.sel = max(0, self.sel - page)
+            elif k == curses.KEY_NPAGE:
+                self.sel = min(last, self.sel + page)
+            elif k == curses.KEY_HOME:
+                self.sel = 0
+            elif k == curses.KEY_END:
+                self.sel = last
+
+
+def main(scr):
+    curses.set_escdelay(25)  # Esc closes popups without the default 1s wait
+    curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_RED, -1)
+    curses.init_pair(2, curses.COLOR_GREEN, -1)
+    curses.init_pair(3, curses.COLOR_CYAN, -1)
+    curses.curs_set(0)
+    conf = load_conf()
+    try:
+        while True:
+            api = authenticate(scr, conf)
+            if api is None:
+                return
+            try:
+                action = LogView(scr, api, conf).run()
+            except AuthError:
+                conf.pop("cookie", None)
+                continue
+            if action == "quit":
+                return
+            api.logout()
+            conf.pop("cookie", None)
+    finally:
+        # Ignore-list and client-filter changes are kept in memory and written once, here.
+        # (A login writes the file itself, so it is compared after that too.)
+        if not conf.get("ignore"):
+            conf.pop("ignore", None)
+        if json.dumps(load_conf(), sort_keys=True) != json.dumps(conf, sort_keys=True):
+            save_conf(conf)
+
+
+if __name__ == "__main__":
+    try:
+        curses.wrapper(main)
+    except KeyboardInterrupt:
+        sys.exit(130)
