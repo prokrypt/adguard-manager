@@ -369,6 +369,8 @@ def _choose(scr, title, items, hint):
             row = y - by - 2
             if 0 <= row < body and top + row < len(shown) and bx < x < bx + bw - 1:
                 sel, k = top + row, "\n"  # one click chooses
+            elif y >= 0 and not (by <= y < by + bh and bx <= x < bx + bw):
+                return None  # click outside the popup cancels
             elif k == "\n":
                 k = None  # double click outside the list
         last = max(0, len(shown) - 1)
@@ -419,6 +421,12 @@ def ask(scr, title, value=""):
             addstr(win, 2, 2, f.value[start: start + width].ljust(width), curses.A_UNDERLINE)
             win.move(2, 2 + f.pos - start)
             k = win.get_wch()
+            if k == curses.KEY_MOUSE:
+                by, bx = win.getbegyx()
+                _, y, x = mouse(scr)
+                if y >= 0 and not (by <= y < by + 5 and bx <= x < bx + bw):
+                    return None  # click outside the popup cancels
+                continue
             if k in (curses.KEY_F10, "\x1b"):
                 return None
             if k in ("\n", "\r", curses.KEY_ENTER):
