@@ -1063,7 +1063,7 @@ class LogView:
             last = max(0, len(self.rows) - 1)
             if k in (curses.KEY_F10, "\x11"):  # F10 / Ctrl+Q
                 return "quit"
-            if k == curses.KEY_F9:
+            if k == curses.KEY_F9 and confirm(self.scr, "Log out?"):
                 return "logout"
             if k in actions:
                 try:
