@@ -79,6 +79,7 @@ class Stream(pyte.ByteStream):
 CLIENTS = [("192.168.1.20", "laptop"), ("192.168.1.31", "living-room-tv"),
            ("192.168.1.45", "phone"), ("192.168.1.50", "")]
 SAMPLE = [  # name, reason, rule, client index
+    ("82ce9f96c9668b26faa80167367901b357fd241534da35d1d756d0269a978bd.us-east-1.cdn.example.com", "NotFilteredNotFound", None, 0),
     ("www.google.com", "NotFilteredNotFound", None, 0),
     ("ads.doubleclick.net", "FilteredBlackList", "||doubleclick.net^", 1),
     ("github.com", "NotFilteredNotFound", None, 0),
