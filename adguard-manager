@@ -660,6 +660,17 @@ def row_buttons(entry, w):
     return out
 
 
+def name_room(entry, w, cw):
+    """Cells the selected row's domain may use before its buttons (23: the columns around the client)."""
+    return max(4, row_buttons(entry, w)[-1][0] - 1 - cw - 23)
+
+
+def name_shown(entry, w, cw):
+    """Cells of the selected row's domain left visible (before any "...")."""
+    n, room = len(qname(entry)), name_room(entry, w, cw)
+    return n if n <= room else room - 3
+
+
 def key(entry):
     q = entry.get("question") or {}
     return entry.get("time"), entry.get("client"), q.get("name"), q.get("type")
@@ -895,15 +906,19 @@ class LogView:
         for i, e in enumerate(self.rows[self.top: self.top + body]):
             q = e.get("question") or {}
             label, color = verdict(e)
+            name = q.get('name', '')
+            if self.top + i == self.sel:
+                name = clip(name, name_room(e, w, cw))  # keep the domain out from under the buttons
             line = (f"{e.get('time', '')[11:19]:8} {clip(client_name(e), cw):{cw}} "
-                    f"{q.get('type', '')[:5]:5} {label:6} {q.get('name', '')}")
+                    f"{q.get('type', '')[:5]:5} {label:6} {name}")
             attr = curses.color_pair(4) | curses.A_DIM if self.ignored(e) else curses.color_pair(color)
             if self.top + i == self.sel:
                 attr |= curses.A_REVERSE
             addstr(scr, 1 + i, 0, line.ljust(w), attr)
             if self.part and self.top + i == self.sel:
-                d = self.part[1]
-                addstr(scr, 1 + i, cw + 23 + len(qname(e)) - len(d), d, (attr ^ curses.A_REVERSE) | curses.A_BOLD)
+                d, n = self.part[1], len(qname(e))
+                addstr(scr, 1 + i, cw + 23 + n - len(d), d[:max(0, name_shown(e, w, cw) - n + len(d))],
+                       (attr ^ curses.A_REVERSE) | curses.A_BOLD)
             if self.top + i == self.sel:
                 for bx, label, _ in row_buttons(e, w):
                     addstr(scr, 1 + i, bx, label, curses.color_pair(color) | curses.A_BOLD)
@@ -1156,7 +1171,8 @@ class LogView:
                         w = self.scr.getmaxyx()[1]
                         k = next((bk for bx, label, bk in row_buttons(cur, w)
                                   if bx <= x < bx + len(label)), k)
-                        d = suffix_at(qname(cur), x - self.cw - 23)  # 23: the columns around the client
+                        di = x - self.cw - 23  # 23: the columns around the client
+                        d = suffix_at(qname(cur), di) if di < name_shown(cur, w, self.cw) else None
                         if k is None and 9 <= x < 9 + self.cw:
                             if not self.client:
                                 try:
