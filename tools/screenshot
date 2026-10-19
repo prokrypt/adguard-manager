@@ -15,6 +15,7 @@ import argparse
 import curses
 import fcntl
 import http.server
+import itertools
 import json
 import os
 import pty
@@ -193,11 +194,21 @@ def main():
     p.add_argument("keys", nargs="*")
     p.add_argument("--app", default=os.path.join(ROOT, "adguard-manager"))
     p.add_argument("--size", default="120x34")
+    p.add_argument("--new-every", type=float, metavar="SECS", help="add a query to the log every SECS seconds (shows refreshes)")
     a = p.parse_args()
     cols, rows = map(int, a.size.split("x"))
 
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fake)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
+    if a.new_every:
+        def grow():
+            for n in itertools.count(2):
+                time.sleep(a.new_every)
+                e = sample_log(n)[-1]
+                e["time"] = time.strftime("%Y-%m-%dT%H:%M:%S") + ".000000+00:00"
+                e["question"]["name"] = "new-%d.example" % (n - 1)
+                Fake.log = [e] + Fake.log
+        threading.Thread(target=grow, daemon=True).start()
     conf = tempfile.mkdtemp()
     with open(os.path.join(conf, "adguard-manager.json"), "w") as f:
         json.dump({"url": "http://127.0.0.1:%d" % srv.server_port, "cookie": "agh_session=fake"}, f)

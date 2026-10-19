@@ -773,9 +773,13 @@ class LogView:
             self.sel = self.rows.index(keep) if keep is not None and keep in self.rows else 0
         elif keep is not None and keep in self.rows:
             # New rows came in on top: stay on the same entry, unless we were at the top.
-            # The view stays put, so the entry moves down until draw() hits the padding.
+            # Scrolled down, the screen stays as it was; with the first row in sight the
+            # new rows show and push the entry down until draw() hits the padding.
             if self.sel:
-                self.sel = self.rows.index(keep)
+                added = self.rows.index(keep) - self.sel
+                self.sel += added
+                if self.top:
+                    self.top += added
         elif keep is None and old == 0:
             self.sel = self.top = 0
         self.sel = min(self.sel, max(0, len(self.rows) - 1))
