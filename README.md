@@ -40,7 +40,7 @@ All commands are on function keys, so typing always filters.
 | F6  | block / unblock the selected query; again = undo | |
 | F7  | list of ignored domains (Enter removes) | add rule (at the end) |
 | F8  | auto-refresh interval: 5s, 10s, 30s, off | delete rule (asks first) |
-| F9  | log out | |
+| F9  | log out (asks first) | |
 | F10 / Ctrl+Q | quit | back |
 
 Typing filters the list (domain, client name or IP), Backspace edits, Esc clears. Arrows, PgUp/PgDn, Home/End move. In popups Enter chooses, Esc cancels; typing filters there too.
