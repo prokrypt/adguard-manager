@@ -45,6 +45,8 @@ All commands are on function keys, so typing always filters.
 
 Typing filters the list (domain, client name or IP), Backspace edits, Esc clears. Arrows, PgUp/PgDn, Home/End move. In popups Enter chooses, Esc cancels; typing filters there too.
 
+Mouse: click a row to select it, the wheel moves the selection, click a footer key to press it, double-click chooses in popups. Hold Shift to select text with the mouse.
+
 ## How it works
 
 - **Login:** `POST /control/login`. Only the `agh_session` cookie is stored, never the password, in `~/.config/adguard-manager` (JSON, mode 600). When the session expires you are asked again.
