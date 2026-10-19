@@ -754,8 +754,11 @@ class LogView:
     def ignore(self):
         return self.conf.setdefault("ignore", [])
 
-    def ignored(self, e):
-        return any(covers(d, qname(e)) for d in self.ignore)
+    def ignored(self, e, ign=None):
+        """ign: set(self.ignore), for callers checking many entries."""
+        parts = qname(e).split(".")
+        ign = ign if ign is not None else set(self.ignore)
+        return bool(ign) and any(".".join(parts[i:]) in ign for i in range(len(parts)))
 
     def type_key(self, k):
         """Type-to-filter in the main list; returns False if k isn't a typing key."""
@@ -781,36 +784,42 @@ class LogView:
     def current(self):
         return self.rows[self.sel] if self.rows else None
 
-    def matches(self, e):
-        t = self.typed.lower()
-        return (t in qname(e) or t in client_name(e).lower() or t in e.get("client", ""))
-
     def apply(self, keep=None, jump=False):
         """Rebuild the visible rows; keep the entry `keep` selected if it is still shown.
 
         jump=True puts the selection straight on `keep` (filter changed);
         otherwise new rows came in on top and the view shifts with them."""
         ip = self.client[0] if self.client else None
+        t, ign = self.typed.lower(), set(self.ignore)
         old = len(self.rows)
-        self.rows = [e for e in self.all
-                     if (ip is None or e.get("client") == ip)
-                     and (self.show_ign or not self.ignored(e))
-                     and (not self.typed or self.matches(e))]
+        rows, hidden, at = [], 0, None
+        for e in self.all:  # up to KEEP entries on every key typed: one pass, nothing recomputed
+            if ip is not None and e.get("client") != ip:
+                continue
+            if self.ignored(e, ign):
+                hidden += 1
+                if not self.show_ign:
+                    continue
+            if t and not (t in qname(e) or t in client_name(e).lower() or t in e.get("client", "")):
+                continue
+            if e is keep:
+                at = len(rows)
+            rows.append(e)
+        self.rows = rows
         if jump:
-            self.sel = self.rows.index(keep) if keep is not None and keep in self.rows else 0
-        elif keep is not None and keep in self.rows:
+            self.sel = at or 0
+        elif at is not None:
             # New rows came in on top: stay on the same entry, unless we were at the top.
             # Scrolled down, the screen stays as it was; with the first row in sight the
             # new rows show and push the entry down until draw() hits the padding.
             if self.sel:
-                added = self.rows.index(keep) - self.sel
+                added = at - self.sel
                 self.sel += added
                 if self.top:
                     self.top += added
         elif keep is None and old == 0:
             self.sel = self.top = 0
         self.sel = min(self.sel, max(0, len(self.rows) - 1))
-        hidden = sum(1 for e in self.all if self.ignored(e))
         self.msg = f"{len(self.rows)} shown" + (f", {hidden} ignored" if hidden else "")
 
     def refresh(self):
@@ -1053,6 +1062,13 @@ class LogView:
         self.client = (ip, label)
         self.conf["client"] = [ip, label]
         self.rows, self.sel, self.top = [], 0, 0
+        if ip not in self.cache and self.cache.get(""):
+            # Start from the client's queries we already hold: refresh() then only fetches the gap,
+            # and the first load goes on from where the full log ends.
+            full = self.cache[""]
+            self.cache[ip] = [e for e in full if e.get("client") == ip]
+            if self.cache[ip] and len(self.cache[ip]) < LOG_LIMIT:
+                self.more[ip] = full[-1].get("time")
         self.refresh()
 
     def ignore_current(self):
