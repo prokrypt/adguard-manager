@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Smoke-test adguard-manager against the fake AdGuard Home from tools/screenshot.
+
+Drives the app in a pty, sends keys, and asserts on the terminal content.
+Needs pyte (the app itself stays stdlib only).
+"""
+import curses
+import fcntl
+import http.server
+import importlib.util
+import json
+import os
+import pty
+import select
+import signal
+import struct
+import subprocess
+import sys
+import tempfile
+import termios
+import threading
+import time
+from importlib.machinery import SourceFileLoader
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_loader = SourceFileLoader("screenshot", os.path.join(ROOT, "tools", "screenshot"))
+_spec = importlib.util.spec_from_loader("screenshot", _loader)
+shot = importlib.util.module_from_spec(_spec)
+_loader.exec_module(shot)
+
+
+class App:
+    def __init__(self, *args, cols=120, rows=34, conf=None):
+        shot.Fake.log = shot.sample_log()
+        shot.Fake.rules = ["@@||cdn.jsdelivr.net^", "||doubleclick.net^", "# local",
+                           "||telemetry.tv-vendor.example^"]
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), shot.Fake)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.confdir = tempfile.mkdtemp()
+        self.conf = os.path.join(self.confdir, "adguard-manager.json")
+        url = "http://127.0.0.1:%d" % self.srv.server_port
+        if conf is None:
+            # old-style config: also exercises the profiles migration
+            conf = {"url": url, "cookie": "agh_session=fake"}
+        elif callable(conf):
+            conf = conf(url)
+        with open(self.conf, "w") as f:
+            json.dump(conf, f)
+        curses.setupterm(shot.TERM, sys.stdout.fileno())
+        self.screen = shot.Screen(cols, rows)
+        self.stream = shot.Stream(self.screen)
+        pid, fd = pty.fork()
+        if pid == 0:
+            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+            os.environ.update(TERM=shot.TERM, XDG_CONFIG_HOME=self.confdir,
+                              LC_ALL="C.UTF-8", NCURSES_NO_UTF8_ACS="1")
+            os.execvp(sys.executable, [sys.executable, os.path.join(ROOT, "adguard-manager"), *args])
+        self.pid, self.fd = pid, fd
+        self.pump(4)  # let the first fetch finish
+
+    def pump(self, secs):
+        end = time.time() + secs
+        while time.time() < end:
+            if select.select([self.fd], [], [], 0.05)[0]:
+                try:
+                    self.stream.feed(os.read(self.fd, 65536))
+                except OSError:
+                    return
+
+    def key(self, k, wait=0.6):
+        os.write(self.fd, curses.tigetstr(shot.TI[k]) if k in shot.TI else shot.OTHER.get(k, k).encode())
+        self.pump(wait)
+
+    def text(self):
+        return "\n".join(self.screen.display)
+
+    def shows(self, s, what=""):
+        assert s in self.text(), "%s: %r not on screen\n%s" % (what, s, self.text())
+
+    def kill(self):
+        try:
+            os.kill(self.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(self.pid, 0)
+        except ChildProcessError:
+            pass
+
+    def quit(self):
+        self.key("F10", wait=1.0)
+        for _ in range(50):
+            if os.waitpid(self.pid, os.WNOHANG)[0]:
+                return
+            time.sleep(0.1)
+        self.kill()
+        raise AssertionError("app did not quit on F10")
+
+
+def test_cli():
+    app = os.path.join(ROOT, "adguard-manager")
+    out = subprocess.run([sys.executable, app, "--version"], capture_output=True, text=True)
+    assert out.returncode == 0 and out.stdout.startswith("adguard-manager 0.1.0"), out
+    out = subprocess.run([sys.executable, app, "--help"], capture_output=True, text=True)
+    assert out.returncode == 0 and "Usage:" in out.stdout, out
+    out = subprocess.run([sys.executable, app, "--bogus"], capture_output=True, text=True)
+    assert out.returncode == 2, out
+    print("cli: OK")
+
+
+def test_log_view():
+    app = App()
+    try:
+        app.shows("ads.doubleclick.net", "query log loads")
+        app.shows("BLOCK", "blocked row marked")
+        for ch in "doubleclick":
+            app.key(ch, wait=0.15)
+        app.shows("filter: doubleclick", "type-to-filter")
+        # F6 removes the custom rule that blocked the row; F6 again undoes it
+        app.key("F6")
+        app.shows("Remove ||doubleclick.net^", "unblock menu")
+        app.key("Enter")
+        app.shows("Removed ||doubleclick.net^", "rule removed")
+        app.shows("now, after F6", "verdict updated")
+        app.key("F6")
+        app.shows("Undone: restored", "F6 undo")
+        app.key("Esc")  # clear the filter
+        # custom rules: validation, add, Ctrl+Z undo, submit
+        app.key("F2")
+        app.shows("||doubleclick.net^", "rules list")
+        app.key("F7")
+        app.shows("Add rule", "add popup")
+        for ch in "bad rule with spaces":
+            app.key(ch, wait=0.1)
+        app.key("Enter")
+        app.shows("no spaces allowed", "rule validation")
+        app.key("Esc")  # cancel the add
+        app.key("F7")
+        for ch in "||smoke.test^":
+            app.key(ch, wait=0.1)
+        app.key("Enter")
+        app.shows("Added ||smoke.test^", "rule added")
+        app.key("\x1a")  # Ctrl+Z
+        app.shows("Undone: removed ||smoke.test^", "Ctrl+Z undo")
+        app.key("F7")
+        for ch in "||smoke.test^":
+            app.key(ch, wait=0.1)
+        app.key("Enter")
+        app.key("F2")  # back: asks to submit
+        app.shows("Submit changes?", "submit prompt")
+        app.key("Enter")  # Yes
+        app.shows("Rules saved (1 changes)", "rules submitted")
+        # help and the F7 view cycle
+        app.key("F1")
+        app.shows("blocked only", "help popup")
+        app.key("Esc")
+        app.key("F7")
+        app.shows("Showing ignored queries", "F7 shows ignored")
+        app.key("F7")
+        app.shows("Showing blocked queries", "F7 blocked only")
+        app.key("F7")
+        app.shows("Hiding ignored queries", "F7 back to normal")
+        app.quit()
+        with open(app.conf) as f:
+            conf = json.load(f)
+        assert conf["profiles"]["default"]["url"].startswith("http://127.0.0.1:"), conf
+        print("log view: OK")
+    finally:
+        app.kill()
+
+
+def test_debug_log():
+    app = App("--debug")
+    try:
+        app.shows("ads.doubleclick.net", "query log loads with --debug")
+        app.quit()
+    finally:
+        app.kill()
+    log = os.path.join(app.confdir, "adguard-manager-debug.log")
+    with open(log) as f:
+        content = f.read()
+    assert "GET /control/querylog" in content, content
+    assert "password" not in content.lower(), "debug log must not contain request bodies"
+    print("debug log: OK")
+
+
+def test_profiles():
+    app = App(conf=lambda url: {
+        "profiles": {"home": {"url": url, "cookie": "agh_session=fake"}, "office": {}},
+        "profile": "home",
+    })
+    try:
+        app.shows("AdGuard server", "profile picker")
+        app.shows("not set up yet", "unconfigured profile marked")
+        app.key("Enter")  # pick "home"
+        app.shows("server: home", "profile shown in the header")
+        app.key("F9")
+        app.shows("Log out?", "logout prompt")
+        app.key("Down")
+        app.key("Enter")  # Yes
+        app.shows("AdGuard server", "picker after logout")
+        app.quit()  # F10 cancels the picker -> quit
+        print("profiles: OK")
+    finally:
+        app.kill()
+
+
+def main():
+    test_cli()
+    test_log_view()
+    test_profiles()
+    test_debug_log()
+    print("smoke: OK")
+
+
+if __name__ == "__main__":
+    main()
