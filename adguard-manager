@@ -197,6 +197,8 @@ def in_thread(fn, *args):
 
 
 WHEEL_DOWN = getattr(curses, "BUTTON5_PRESSED", 0x200000)  # Python < 3.10 lacks the name
+DOUBLE_CLICK = 0.4  # seconds between two presses on the same cell
+_last_press = (0.0, -1, -1)  # time, y, x of the previous button press
 
 
 def mouse(scr, keys=()):
@@ -204,7 +206,12 @@ def mouse(scr, keys=()):
 
     Wheel gives KEY_UP/KEY_DOWN, a click on a footer key gives that F key, a double
     click gives "\n" (choose) and a single click None, both with the clicked y, x.
-    y is -1 when there is no position to act on."""
+    y is -1 when there is no position to act on.
+
+    A click is the button press itself (main() sets mouseinterval(0)): touchpad taps
+    with tap-and-drag hold the release back longer than ncurses' click window, so
+    waiting for a CLICKED event would miss them. Double clicks are timed here."""
+    global _last_press
     try:
         _, x, y, _, b = curses.getmouse()
     except curses.error:
@@ -213,15 +220,18 @@ def mouse(scr, keys=()):
         return curses.KEY_UP, -1, -1
     if b & WHEEL_DOWN:
         return curses.KEY_DOWN, -1, -1
-    if not b & (curses.BUTTON1_CLICKED | curses.BUTTON1_DOUBLE_CLICKED):
+    if not b & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED):
         return None, -1, -1
+    now = time.monotonic()
+    double = now - _last_press[0] < DOUBLE_CLICK and _last_press[1:] == (y, x)
+    _last_press = (0.0, -1, -1) if double else (now, y, x)
     h, w = scr.getmaxyx()
     if keys and y == h - 1:
         for kx, key, label in footer_layout(keys, w)[0]:
             if kx <= x < kx + len(key) + len(label):
                 return curses.KEY_F0 + int(key[1:]), -1, -1
         return None, -1, -1
-    return ("\n" if b & curses.BUTTON1_DOUBLE_CLICKED else None), y, x
+    return ("\n" if double else None), y, x
 
 
 class Field:
@@ -1307,6 +1317,7 @@ def main(scr):
     curses.init_pair(4, 8 if curses.COLORS >= 16 else -1, -1)  # grey (bright black) where available
     curses.curs_set(0)
     curses.mousemask(curses.ALL_MOUSE_EVENTS)  # Shift+drag still selects text in most terminals
+    curses.mouseinterval(0)  # raw press/release, no click building: see mouse()
     # Turn off XON/XOFF so Ctrl+Q reaches us; curses.wrapper restores the tty on exit.
     attrs = termios.tcgetattr(sys.stdin)
     attrs[0] &= ~termios.IXON
