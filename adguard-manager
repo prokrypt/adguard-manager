@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """adguard-manager: curses front end for the AdGuard Home query log.
 
-Keys are function keys: F2 custom rules manager, F3 filter by client, F4 ignore a domain (on a greyed row:
-ignored list), F5 refresh, F6 block/unblock, F7 show/hide ignored queries, F8 auto-refresh interval, F9 log out, F10 or Ctrl+Q quit.
+Keys are function keys: F2 custom rules manager, F3 filter by client, F4 ignore a domain
+(on a greyed row: un-ignore; the ignored list is the last item of its menu), F5 refresh,
+F6 block/unblock, F7 show/hide ignored queries, F8 auto-refresh interval, F9 log out, F10 or Ctrl+Q quit.
 Typing filters the list (domain, client name or IP); Esc clears it.
 The session cookie (never the password), the ignore list and the client
 filter are kept in ~/.config/adguard-manager.json, mode 600. That file is written
@@ -726,7 +727,7 @@ class LogView:
         cur = self.current()
         block = "Unblock" if cur and verdict(cur)[0] == "BLOCK" else "Block"
         return [("F2", "Rules"), ("F3", "All clients" if self.client else "Client"),
-                ("F4", "Ignored" if cur and self.ignored(cur) else "Ignore"),
+                ("F4", "Ignore"),
                 ("F5", "Refresh"), ("F6", block), ("F7", "Hide ign" if self.show_ign else "Show ign"),
                 ("F8", f"Auto {self.auto}s" if self.auto else "Auto off"), ("F9", "Logout"), ("F10", "Quit")]
 
@@ -969,9 +970,18 @@ class LogView:
         cur = self.current()
         if not cur:
             return
-        if self.ignored(cur):
+        if self.ignored(cur):  # F4 again on a greyed row un-ignores it
+            gone = [d for d in self.ignore if covers(d, qname(cur))]
+            self.ignore[:] = [d for d in self.ignore if d not in gone]
+            self.apply(cur)
+            self.msg = f"Not ignoring {', '.join(gone)}; " + self.msg
+            return
+        opts = levels(qname(cur))
+        i = choose(self.scr, "Ignore", [f"{d} and its subdomains" for d in opts] +
+                   (["Ignored list…"] if self.ignore else []))
+        if i == len(opts):
             return self.edit_ignored()
-        d = self.pick_level("Ignore", qname(cur), " and its subdomains")
+        d = None if i is None else opts[i]
         if d and d not in self.ignore:
             self.ignore.append(d)
             self.apply(self.current())

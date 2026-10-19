@@ -35,7 +35,7 @@ All commands are on function keys, so typing always filters.
 |-----|-----------|-------------------|
 | F2  | open the custom rules manager | back |
 | F3  | show one client (pick from a list) / all clients | |
-| F4  | ignore a domain or subdomain (hide it in the list); on a greyed (ignored) row: list of ignored domains (Enter removes) | edit rule |
+| F4  | ignore a domain or subdomain (hide it in the list); on a greyed (ignored) row: un-ignore it. Last menu item: list of ignored domains (Enter removes) | edit rule |
 | F5  | refresh | reload |
 | F6  | block / unblock the selected query; again = undo | |
 | F7  | show / hide ignored queries (greyed out; hidden at start) | add rule (at the end) |
