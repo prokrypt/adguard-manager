@@ -3,7 +3,7 @@
 
 Keys are function keys: F2 custom rules manager, F3 filter by client, F4 ignore a domain
 (on a greyed row: un-ignore; the ignored list is the last item of its menu), F5 refresh,
-F6 block/unblock, F7 show/hide ignored queries, F8 auto-refresh interval, F9 log out, F10 or Ctrl+Q quit.
+F6 block/unblock (or block the answer IPs), F7 show/hide ignored queries, F8 auto-refresh interval, F9 log out, F10 or Ctrl+Q quit.
 Typing filters the list (domain, client name or IP); Esc clears it.
 The session cookie (never the password), the ignore list and the client
 filter are kept in ~/.config/adguard-manager.json, mode 600. That file is written
@@ -961,11 +961,6 @@ class LogView:
             self.rows, self.sel, self.top = [], 0, 0
             self.refresh()
 
-    def pick_level(self, title, name, what):
-        opts = levels(name)
-        i = choose(self.scr, title, [f"{d}{what}" for d in opts])
-        return None if i is None else opts[i]
-
     def ignore_current(self):
         cur = self.current()
         if not cur:
@@ -1012,7 +1007,13 @@ class LogView:
             return
         name = qname(cur)
         unblock = verdict(cur)[0] == "BLOCK"
-        d = self.pick_level("Unblock" if unblock else "Block", name, " and its subdomains")
+        opts = levels(name)
+        ips = [] if unblock else [a["value"] for a in cur.get("answer") or [] if a.get("type") in ("A", "AAAA")]
+        i = choose(self.scr, "Unblock" if unblock else "Block", [f"{d} and its subdomains" for d in opts] +
+                   ([f"Its answer IPs: {', '.join(ips)}"] if ips else []))
+        if i == len(opts):
+            return self.block_ips(cur, ips)
+        d = None if i is None else opts[i]
         if not d:
             return
         block, allow = f"||{d}^", f"@@||{d}^"
@@ -1045,6 +1046,24 @@ class LogView:
         cur["f6"] = ops
         done = "; ".join(("Removed " if op == "del" else "Added ") + r for op, r, _ in ops)
         self.msg = f"{done}; {name} is now {verdict(check)[0] or 'not blocked'} (F6 again undoes)"
+
+    def block_ips(self, cur, ips):
+        """Block responses carrying any of these IPs (one ||ip^ rule each); F6 again undoes."""
+        rules = self.api.user_rules()
+        have = {r.strip() for r in rules}
+        ops = []
+        for ip in dict.fromkeys(ips):
+            if f"||{ip}^" not in have:
+                rules.append(f"||{ip}^")
+                ops.append(("add", f"||{ip}^", len(rules) - 1))
+        if not ops:
+            self.msg = "No change: those IPs are already blocked"
+            return
+        self.api.set_user_rules(rules)
+        for key in ("reason", "rules", "service_name"):
+            cur.setdefault("was_" + key, cur.get(key, "" if key != "rules" else []))
+        cur["f6"] = ops
+        self.msg = "Added " + ", ".join(r for _, r, _ in ops) + " (F6 again undoes)"
 
     def undo_block(self, cur):
         """Reverse the rule edits F6 made on this row and show its original status again."""
