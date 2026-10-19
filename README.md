@@ -43,7 +43,7 @@ All commands are on function keys, so typing always filters.
 | F9  | log out (asks first) | |
 | F10 / Ctrl+Q | quit | back |
 
-Typing filters the list (domain, client name or IP), Backspace edits, Esc clears. Arrows, PgUp/PgDn, Home/End move. In popups Enter chooses, Esc cancels; typing filters there too.
+Typing filters the list (domain, client name or IP), Backspace edits, Esc clears. Up/Down, PgUp/PgDn, Home/End move. On the selected row, Left picks the client and Right picks the whole domain, then each Right a shorter part of it (stops at example.com); the pick is bold. Enter on a picked client shows only that client; Enter on a picked domain part opens a Block/Unblock, Ignore/Unignore menu for it; Enter with nothing picked asks Block or Ignore, then shows that key's usual list. In popups Enter chooses, Esc cancels; typing filters there too.
 
 Mouse: click a row to select it, click its [BLK]/[UBLK] or [IGN] button to press F6 or F4, click its client to show only that client, click a part of its domain to pick it to the end, shown in bold (clicking "cdn" in ads.cdn.example.com picks cdn.example.com), so F4/F6 use it without asking (click it again for a Block/Unblock, Ignore/Unignore menu; click elsewhere on the row to clear it), the wheel moves the selection, click a footer key to press it, click an item in a popup to choose it, click outside a popup to cancel it. Hold Shift to select text with the mouse.
 

@@ -6,7 +6,8 @@ Keys are function keys: F2 custom rules manager, F3 filter by client, F4 ignore 
 F6 block/unblock (or block the answer IPs or CNAMEs, or remove the custom rule that blocked it), F7 show/hide ignored queries, F8 auto-refresh interval, F9 log out, F10 or Ctrl+Q quit.
 Typing filters the list (domain, client name or IP); Esc clears it.
 On the selected row, clicking the client filters by it and clicking a domain label
-picks it and its parent domains for F4/F6.
+picks it and its parent domains for F4/F6. Keys: Left picks the client, Right the domain
+(again: shorter), Enter acts on the pick, or with no pick asks block or ignore.
 The session cookie (never the password), the ignore list and the client
 filter are kept in ~/.config/adguard-manager.json, mode 600. That file is written
 at login, and on exit if the ignore list or client filter changed or you
@@ -703,7 +704,8 @@ class LogView:
         # (ip, label) while filtering by client; remembered in conf, saved on exit
         self.client = tuple(conf["client"]) if conf.get("client") else None
         self.cw, self.cw_at, self.cw_client = 6, 0, None  # client column width, see draw()
-        self.part = None    # (entry, domain) after a click on the selected row's domain; F4/F6 use it
+        self.part = None    # (entry, domain) after a click on the selected row's domain (or Right); F4/F6 use it
+        self.on_client = None  # entry whose client is picked (click or Left); Enter filters by it
         self.typed = ""     # type-to-filter text: matches domain, client name or IP
         self.show_ign = False  # F7: show ignored queries greyed out instead of hiding them
         self.body = 1       # list rows on screen, set by draw()
@@ -891,6 +893,8 @@ class LogView:
         self.pad = PAD
         if self.part and self.part[0] is not cur:
             self.part = None  # the selection moved
+        if self.on_client is not cur:
+            self.on_client = None
         # Client column fits the longest name on screen.
         # It grows at once but shrinks only while scrolling, one cell per second, so it doesn't jump.
         names = [client_name(e) for e in self.rows[self.top: self.top + body]]
@@ -919,6 +923,8 @@ class LogView:
             if self.top + i == self.sel:
                 attr |= curses.A_REVERSE
             addstr(scr, 1 + i, 0, line.ljust(w), attr)
+            if self.on_client and self.top + i == self.sel:
+                addstr(scr, 1 + i, 9, clip(client_name(e), cw), attr | curses.A_BOLD)
             if self.part and self.top + i == self.sel:
                 d, n = self.part[1], len(qname(e))
                 addstr(scr, 1 + i, cw + 23 + n - len(d), d[:max(0, name_shown(e, w, cw) - n + len(d))],
@@ -990,6 +996,30 @@ class LogView:
         if i is not None:
             ip, (label, _) = clients[i]
             self.set_client(ip, label)
+
+    def row_key(self, k):
+        """Left picks the client, Right the whole domain and then shorter parts of it, Enter acts
+        on the pick (filter by the client, or the block/ignore menu). Returns an F key to run, or None."""
+        cur = self.current()
+        if not cur or not qname(cur):
+            return None
+        if k == curses.KEY_LEFT:
+            self.part, self.on_client = None, cur
+        elif k == curses.KEY_RIGHT:
+            opts = levels(qname(cur))
+            d = self.part[1] if self.part else None
+            self.part = (cur, opts[min(opts.index(d) + 1, len(opts) - 1)] if d in opts else opts[0])
+            self.on_client = None
+        elif self.on_client:
+            if not self.client:
+                self.set_client(cur.get("client", ""), client_name(cur))
+        else:
+            d = self.part[1] if self.part else ""
+            blocked = verdict(cur)[0] == "BLOCK"
+            opts = [("Unblock" if blocked else "Block") + (" " + d if d else ""),
+                    ("Unignore" if self.ignored(cur) else "Ignore") + (" " + d if d else "")]
+            i = choose(self.scr, d or qname(cur), opts)
+            return None if i is None else (curses.KEY_F6, curses.KEY_F4)[i]
 
     def set_client(self, ip, label):
         self.client = (ip, label)
@@ -1176,30 +1206,21 @@ class LogView:
                 continue
             if k == curses.KEY_MOUSE:
                 k, y, x = mouse(self.scr, self.keys())
+                k = None if k == "\n" else k  # a quick second click arrives as a double click
                 if 0 <= y - 1 < self.body and self.top + y - 1 < len(self.rows):
                     if self.top + y - 1 == self.sel:  # buttons and the client/domain clicks are for the selected row
                         cur = self.rows[self.sel]
                         w = self.scr.getmaxyx()[1]
-                        k = None if k == "\n" else k  # a quick second click arrives as a double click
                         k = next((bk for bx, label, bk in row_buttons(cur, w)
                                   if bx <= x < bx + len(label)), k)
                         di = x - self.cw - 23  # 23: the columns around the client
                         d = suffix_at(qname(cur), di) if di < name_shown(cur, w, self.cw) else None
-                        if k is None and 9 <= x < 9 + self.cw:
-                            if not self.client:
-                                try:
-                                    self.set_client(cur.get("client", ""), client_name(cur))
-                                except RuntimeError as e:
-                                    self.msg = str(e)
-                            continue
-                        if k is None and d and self.part and self.part[0] is cur and self.part[1] == d:
-                            # a second click on the bold part offers F6/F4 for it
-                            opts = [("Unblock " if verdict(cur)[0] == "BLOCK" else "Block ") + d,
-                                    ("Unignore " if self.ignored(cur) else "Ignore ") + d]
-                            i = choose(self.scr, d, opts)
-                            k = None if i is None else (curses.KEY_F6, curses.KEY_F4)[i]
-                        elif k is None:  # any other click on the row clears the domain part
-                            self.part = (cur, d) if d else None
+                        if k is None and 9 <= x < 9 + self.cw:  # client: filter by it, like Left Enter
+                            self.part, self.on_client, k = None, cur, "\n"
+                        elif k is None and d and self.part and self.part[0] is cur and self.part[1] == d:
+                            k = "\n"  # a second click on the bold part: its block/ignore menu, like Enter
+                        elif k is None:  # any other click on the row clears the pick
+                            self.part, self.on_client = ((cur, d) if d else None), None
                     self.sel, self.pad = self.top + y - 1, 0
             page = self.body
             last = max(0, len(self.rows) - 1)
@@ -1207,6 +1228,11 @@ class LogView:
                 return "quit"
             if k == curses.KEY_F9 and confirm(self.scr, "Log out?"):
                 return "logout"
+            if k in (curses.KEY_LEFT, curses.KEY_RIGHT, "\n", "\r", curses.KEY_ENTER):
+                try:
+                    k = self.row_key(k)
+                except RuntimeError as e:
+                    self.msg = str(e)
             if k in actions:
                 try:
                     actions[k]()
