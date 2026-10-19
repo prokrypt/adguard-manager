@@ -6,7 +6,7 @@
 Runs the app in a pty (COLSxROWS, default 120x34) against a built-in fake server
 with sample data, sends the keys, then renders the terminal to PNG and prints it as text.
 KEY is F1..F12, Up, Down, PgUp, PgDn, Home, End, Enter, Esc, Tab, Bksp,
-wait:SECONDS, or any other text (typed as is, e.g. into the filter).
+wait:SECONDS, click:X,Y (0-based cell), or any other text (typed as is, e.g. into the filter).
 Options: --app PATH (another copy, e.g. `git show origin/main:adguard-manager > /tmp/old`
 for a before shot), --size COLSxROWS.
 Needs pyte and Pillow (`python3 -m pip install pyte pillow`); the app itself stays stdlib only.
@@ -221,6 +221,11 @@ def main():
     for k in a.keys:
         if k.startswith("wait:"):
             pump(float(k[5:]))
+            continue
+        if k.startswith("click:"):
+            x, y = (int(n) + 1 for n in k[6:].split(","))
+            os.write(fd, f"\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m".encode())  # SGR press + release
+            pump(0.4)
             continue
         os.write(fd, curses.tigetstr(TI[k]) if k in TI else OTHER.get(k, k).encode())
         pump(0.4)

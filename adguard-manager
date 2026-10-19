@@ -5,6 +5,8 @@ Keys are function keys: F2 custom rules manager, F3 filter by client, F4 ignore 
 (on a greyed row: un-ignore; the ignored list is the last item of its menu), F5 refresh,
 F6 block/unblock (or block the answer IPs, or remove the custom rule that blocked it), F7 show/hide ignored queries, F8 auto-refresh interval, F9 log out, F10 or Ctrl+Q quit.
 Typing filters the list (domain, client name or IP); Esc clears it.
+On the selected row, clicking the client filters by it and clicking a domain label
+picks it and its parent domains for F4/F6.
 The session cookie (never the password), the ignore list and the client
 filter are kept in ~/.config/adguard-manager.json, mode 600. That file is written
 at login, and on exit if the ignore list or client filter changed or you
@@ -635,6 +637,12 @@ def levels(name):
     return [".".join(parts[i:]) for i in range(max(1, len(parts) - 1))]
 
 
+def suffix_at(name, i):
+    """The level of name whose first label holds index i: "cdn" in ads.cdn.example.com -> cdn.example.com."""
+    if 0 <= i < len(name):
+        return [d for d in levels(name) if len(name) - len(d) <= i][-1]
+
+
 def covers(domain, name):
     return name == domain or name.endswith("." + domain)
 
@@ -684,6 +692,7 @@ class LogView:
         # (ip, label) while filtering by client; remembered in conf, saved on exit
         self.client = tuple(conf["client"]) if conf.get("client") else None
         self.cw, self.cw_at, self.cw_client = 6, 0, None  # client column width, see draw()
+        self.part = None    # (entry, domain) after a click on the selected row's domain; F4/F6 use it
         self.typed = ""     # type-to-filter text: matches domain, client name or IP
         self.show_ign = False  # F7: show ignored queries greyed out instead of hiding them
         self.body = 1       # list rows on screen, set by draw()
@@ -865,10 +874,12 @@ class LogView:
         body = self.body = max(1, h - 2 - dh)
         top, self.top = self.top, scroll(self.top, self.sel, body, len(self.rows), self.pad)
         self.pad = PAD
-        # Client column fits the longest name on screen; minimal while filtering by one client.
+        if self.part and self.part[0] is not cur:
+            self.part = None  # the selection moved
+        # Client column fits the longest name on screen.
         # It grows at once but shrinks only while scrolling, one cell per second, so it doesn't jump.
         names = [client_name(e) for e in self.rows[self.top: self.top + body]]
-        want = 6 if self.client else min(CLIENT_MAX, max([6] + [len(n) for n in names]))
+        want = min(CLIENT_MAX, max([6] + [len(n) for n in names]))
         now = time.monotonic()
         if want >= self.cw or self.client != self.cw_client:
             self.cw, self.cw_client = want, self.client
@@ -890,6 +901,9 @@ class LogView:
             if self.top + i == self.sel:
                 attr |= curses.A_REVERSE
             addstr(scr, 1 + i, 0, line.ljust(w), attr)
+            if self.part and self.top + i == self.sel:
+                d = self.part[1]
+                addstr(scr, 1 + i, cw + 23 + len(qname(e)) - len(d), d, (attr ^ curses.A_REVERSE) | curses.A_BOLD)
             if self.top + i == self.sel:
                 for bx, label, _ in row_buttons(e, w):
                     addstr(scr, 1 + i, bx, label, curses.color_pair(color) | curses.A_BOLD)
@@ -956,10 +970,13 @@ class LogView:
         i = choose(self.scr, "Show only client", items)
         if i is not None:
             ip, (label, _) = clients[i]
-            self.client = (ip, label)
-            self.conf["client"] = [ip, label]
-            self.rows, self.sel, self.top = [], 0, 0
-            self.refresh()
+            self.set_client(ip, label)
+
+    def set_client(self, ip, label):
+        self.client = (ip, label)
+        self.conf["client"] = [ip, label]
+        self.rows, self.sel, self.top = [], 0, 0
+        self.refresh()
 
     def ignore_current(self):
         cur = self.current()
@@ -971,16 +988,24 @@ class LogView:
             self.apply(cur)
             self.msg = f"Not ignoring {', '.join(gone)}; " + self.msg
             return
+        if self.part:
+            d = self.part[1]
+        else:
+            d = self.pick_ignore(cur)
+            if d is None:
+                return
+        if d not in self.ignore:
+            self.ignore.append(d)
+            self.apply(self.current())
+            self.msg = f"Ignoring {d}; " + self.msg
+
+    def pick_ignore(self, cur):
         opts = levels(qname(cur))
         i = choose(self.scr, "Ignore", [f"{d} and its subdomains" for d in opts] +
                    (["Ignored list…"] if self.ignore else []))
         if i == len(opts):
             return self.edit_ignored()
-        d = None if i is None else opts[i]
-        if d and d not in self.ignore:
-            self.ignore.append(d)
-            self.apply(self.current())
-            self.msg = f"Ignoring {d}; " + self.msg
+        return None if i is None else opts[i]
 
     def toggle_ignored(self):
         self.show_ign = not self.show_ign
@@ -1007,14 +1032,16 @@ class LogView:
             return
         name = qname(cur)
         unblock = verdict(cur)[0] == "BLOCK"
-        opts = levels(name)
+        opts = [self.part[1]] if self.part else levels(name)
         rules = self.api.user_rules()
         # Unblock offers first to remove the custom rules that blocked this row.
         mine = [t for t in dict.fromkeys(r.get("text", "") for r in cur.get("rules") or [])
                 if unblock and not t.startswith("@@") and t in (r.strip() for r in rules)]
         ips = [] if unblock else [a["value"] for a in cur.get("answer") or [] if a.get("type") in ("A", "AAAA")]
-        i = choose(self.scr, "Unblock" if unblock else "Block", [f"Remove {t}" for t in mine] +
-                   [f"{d} and its subdomains" for d in opts] + ([f"Its answer IPs: {', '.join(ips)}"] if ips else []))
+        # A clicked domain part is used directly, without the menu.
+        i = len(mine) if self.part else choose(
+            self.scr, "Unblock" if unblock else "Block", [f"Remove {t}" for t in mine] +
+            [f"{d} and its subdomains" for d in opts] + ([f"Its answer IPs: {', '.join(ips)}"] if ips else []))
         if i is None:
             return
         if i == len(mine) + len(opts):
@@ -1124,10 +1151,21 @@ class LogView:
             if k == curses.KEY_MOUSE:
                 k, y, x = mouse(self.scr, self.keys())
                 if 0 <= y - 1 < self.body and self.top + y - 1 < len(self.rows):
-                    if self.top + y - 1 == self.sel:  # buttons only show on the selected row
+                    if self.top + y - 1 == self.sel:  # buttons and the client/domain clicks are for the selected row
+                        cur = self.rows[self.sel]
                         w = self.scr.getmaxyx()[1]
-                        k = next((bk for bx, label, bk in row_buttons(self.rows[self.sel], w)
+                        k = next((bk for bx, label, bk in row_buttons(cur, w)
                                   if bx <= x < bx + len(label)), k)
+                        d = suffix_at(qname(cur), x - self.cw - 23)  # 23: the columns around the client
+                        if k is None and 9 <= x < 9 + self.cw:
+                            if not self.client:
+                                try:
+                                    self.set_client(cur.get("client", ""), client_name(cur))
+                                except RuntimeError as e:
+                                    self.msg = str(e)
+                            continue
+                        if k is None and d:
+                            self.part = (cur, d)
                     self.sel, self.pad = self.top + y - 1, 0
             page = self.body
             last = max(0, len(self.rows) - 1)

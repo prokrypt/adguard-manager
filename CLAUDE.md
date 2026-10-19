@@ -32,7 +32,7 @@ Notes for making changes. User-facing docs are in README.md.
 - Errors: actions raise `RuntimeError` and the loop shows it in `self.msg`. `AuthError` is not caught in views; it goes up to `main`, which drops the cookie and shows the login form again.
 - Status text goes in `self.msg` (right side of the footer). Messages are prepended like `"Ignoring x; " + self.msg` after `apply()` rewrites it.
 - After a popup closes, `choose`/`ask` call `scr.touchwin()`, so the caller just redraws.
-- Mouse: a row click sets `self.pad = 0` for one draw so the clicked row doesn't move. Buttons (`row_buttons`) show only on the selected row and map to F4/F6.
+- Mouse: a row click sets `self.pad = 0` for one draw so the clicked row doesn't move. Buttons (`row_buttons`) show only on the selected row and map to F4/F6. On the selected row a client click calls `set_client`, a domain click sets `self.part = (entry, suffix_at(...))`, which F4/F6 use instead of their menu; `draw()` drops it once the selection moves.
 
 ## LogView data flow (the tricky part)
 
@@ -47,7 +47,7 @@ Notes for making changes. User-facing docs are in README.md.
 
 ## Drawing
 
-- `LogView.draw`: header row, list (`body` rows), `─ Details ─` pane (`DETAIL_ROWS`, grows for wrapped text, dropped when the screen is too short), footer on the last line. The client column width fits the visible names, capped at `CLIENT_MAX`; it grows at once, but shrinks one cell per second and only while scrolling (`cw`, `cw_at`).
+- `LogView.draw`: header row, list (`body` rows), `─ Details ─` pane (`DETAIL_ROWS`, grows for wrapped text, dropped when the screen is too short), footer on the last line. The client column width fits the visible names (also while filtering by client), capped at `CLIENT_MAX`; it grows at once, but shrinks one cell per second and only while scrolling (`cw`, `cw_at`).
 - `addstr` drops the last cell of the bottom row (curses errors writing the bottom-right corner). Always draw through it, never `win.addstr` directly.
 - Colors: pair 1 red (BLOCK/errors), 2 green (ALLOW, `@@` rules), 3 cyan (REWR), 4 grey (ignored rows, shown with F7); default background.
 
