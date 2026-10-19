@@ -32,7 +32,7 @@ Notes for making changes. User-facing docs are in README.md.
 - Errors: actions raise `RuntimeError` and the loop shows it in `self.msg`. `AuthError` is not caught in views; it goes up to `main`, which drops the cookie and shows the login form again.
 - Status text goes in `self.msg` (right side of the footer). Messages are prepended like `"Ignoring x; " + self.msg` after `apply()` rewrites it.
 - After a popup closes, `choose`/`ask` call `scr.touchwin()`, so the caller just redraws.
-- Mouse: a row click sets `self.pad = 0` for one draw so the clicked row doesn't move. Buttons (`row_buttons`) show only on the selected row and map to F4/F6. On the selected row a client click calls `set_client`, a domain click sets `self.part = (entry, suffix_at(...))`, which F4/F6 use instead of their menu; `draw()` drops it once the selection moves.
+- Mouse: a row click sets `self.pad = 0` for one draw so the clicked row doesn't move. Buttons (`row_buttons`) show only on the selected row and map to F4/F6. On the selected row a client click calls `set_client`, a domain click sets `self.part = (entry, suffix_at(...))`, which F4/F6 use instead of their menu; any other click on the row clears it, and `draw()` drops it once the selection moves.
 
 ## LogView data flow (the tricky part)
 

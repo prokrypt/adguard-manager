@@ -45,7 +45,7 @@ All commands are on function keys, so typing always filters.
 
 Typing filters the list (domain, client name or IP), Backspace edits, Esc clears. Arrows, PgUp/PgDn, Home/End move. In popups Enter chooses, Esc cancels; typing filters there too.
 
-Mouse: click a row to select it, click its [BLK]/[UBLK] or [IGN] button to press F6 or F4, click its client to show only that client, click a part of its domain to highlight it to the end (clicking "cdn" in ads.cdn.example.com picks cdn.example.com) so F4/F6 use it without asking, the wheel moves the selection, click a footer key to press it, click an item in a popup to choose it, click outside a popup to cancel it. Hold Shift to select text with the mouse.
+Mouse: click a row to select it, click its [BLK]/[UBLK] or [IGN] button to press F6 or F4, click its client to show only that client, click a part of its domain to pick it to the end, shown in bold (clicking "cdn" in ads.cdn.example.com picks cdn.example.com), so F4/F6 use it without asking (click elsewhere on the row to clear it), the wheel moves the selection, click a footer key to press it, click an item in a popup to choose it, click outside a popup to cancel it. Hold Shift to select text with the mouse.
 
 ## How it works
 
