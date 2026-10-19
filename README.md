@@ -11,7 +11,9 @@ install -m755 adguard-manager ~/.local/bin/
 adguard-manager
 ```
 
-Needs Python 3.9 or newer. The first start asks for the server URL (default `http://adguard.lan`), username and password.
+Needs Python 3.9 or newer. The first start asks for the server URL (default `http://adguard.lan`), username and password. `adguard-manager --help` lists the flags (`--debug` logs API traffic to `~/.config/adguard-manager-debug.log`).
+
+Several servers can be kept as named profiles: after logging out, or when a second server is added, a server picker appears (the header then shows which server you are on). The ignore list and client filter are shared; each profile keeps its own URL and session cookie.
 
 ## Keys
 
@@ -19,12 +21,13 @@ All commands are on function keys, so typing always filters.
 
 | Key | Main list | Custom rules (F2) |
 |-----|-----------|-------------------|
+| F1  | this help | this help |
 | F2  | open the custom rules manager | back (asks to submit changes) |
 | F3  | show one client (pick from a list) / all clients | |
 | F4  | ignore a domain or subdomain (hide it in the list); on a greyed (ignored) row: un-ignore it. Last menu item: list of ignored domains (Enter removes) | edit rule |
 | F5  | refresh | reload |
-| F6  | block / unblock the selected query, block its answer IPs or CNAMEs, or remove its blocking rule; again = undo | |
-| F7  | show / hide ignored queries (greyed out; hidden at start) | add rule (at the end) |
+| F6  | block / unblock the selected query, block its answer IPs or CNAMEs, or remove its blocking rule; again = undo | undo last change (also Ctrl+Z) |
+| F7  | cycle: show ignored (greyed out) / blocked only / hide ignored | add rule (at the end) |
 | F8  | auto-refresh interval: 5s, 10s, 30s, off | delete rule (also Delete) |
 | F9  | log out (asks first) | |
 | F10 / Ctrl+Q | quit | back (asks to submit changes) |
@@ -33,11 +36,11 @@ Typing filters the list (domain, client name or IP), Backspace edits, Esc clears
 
 Mouse: click a row to select it, click its [BLK]/[UBLK] or [IGN] button to press F6 or F4, click its client to show only that client, click a part of its domain to pick it to the end, shown in bold (clicking "cdn" in ads.cdn.example.com picks cdn.example.com), so F4/F6 use it without asking (click it again for a Block/Unblock, Ignore/Unignore menu; click elsewhere on the row to clear it), the wheel moves the selection, click a footer key to press it, click an item in a popup to choose it, click outside a popup to cancel it. Hold Shift to select text with the mouse.
 
-Custom rules (F2): Enter, or a click on the selected rule, asks Edit or Delete. Esc clears the filter, or goes back when there is none.
+Custom rules (F2): Enter, or a click on the selected rule, asks Edit or Delete. F6 or Ctrl+Z undoes the last change (Ctrl+Z no longer suspends the app while it runs). New rules are checked lightly (no spaces allowed); an invalid rule re-opens the editor instead of being added. Esc clears the filter, or goes back when there is none.
 
 ## How it works
 
-- **Login:** `POST /control/login`. Only the `agh_session` cookie is stored, never the password, in `~/.config/adguard-manager.json` (JSON, mode 600). When the session expires you are asked again.
+- **Login:** `POST /control/login`. Only the `agh_session` cookie is stored, never the password, in `~/.config/adguard-manager.json` (JSON, mode 600). When the session expires you are asked again. Logging in over plain HTTP to a non-local host asks for confirmation first, since the password would go over the wire unencrypted.
 - **Few disk writes:** the config file is written at login, and on exit only if the ignore list or the client filter changed (or you logged out). Refreshing writes nothing.
 - **Little network traffic:** the first load fetches 20 entries (fills the screen), then pages of 100 up to 500 between keypresses. Refresh (F5, or automatic every 5s) asks for 20 entries and stops at the first one it already has; longer gaps take bigger pages. New entries are added on top.
 - **Block/unblock (F6):** edits the custom filtering rules. Unblock removes a matching `||name^` rule, and adds `@@||name^` if the name is still blocked; block works the other way. You choose the level (`ads.x.example.com`, `x.example.com` or `example.com`, each with its subdomains). The row then shows AdGuard's current verdict (`/control/filtering/check_host`) and the details keep the original one. Unblock first offers to remove the custom rule that blocked the query, if it is still there. Block also offers the query's answer IPs as the last item: it adds `||ip^` for each A/AAAA answer not already blocked, which blocks any response carrying that IP. Each answer CNAME's levels are offered too, and with several CNAMEs an item blocks them all (`||cname^` each). F6 again on the same row undoes exactly what it did.
