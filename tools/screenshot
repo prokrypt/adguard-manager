@@ -7,7 +7,7 @@ Runs the app in a pty (COLSxROWS, default 120x34) against a built-in fake server
 with sample data, sends the keys, then renders the terminal to PNG and prints it as text.
 KEY is F1..F12, Up, Down, PgUp, PgDn, Home, End, Enter, Esc, Tab, Bksp,
 wait:SECONDS, or any other text (typed as is, e.g. into the filter).
-Options: --app PATH (another copy, e.g. `git show main:adguard-manager > /tmp/old`
+Options: --app PATH (another copy, e.g. `git show origin/main:adguard-manager > /tmp/old`
 for a before shot), --size COLSxROWS.
 Needs pyte and Pillow (`python3 -m pip install pyte pillow`); the app itself stays stdlib only.
 """
