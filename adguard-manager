@@ -1180,6 +1180,7 @@ class LogView:
                     if self.top + y - 1 == self.sel:  # buttons and the client/domain clicks are for the selected row
                         cur = self.rows[self.sel]
                         w = self.scr.getmaxyx()[1]
+                        k = None if k == "\n" else k  # a quick second click arrives as a double click
                         k = next((bk for bx, label, bk in row_buttons(cur, w)
                                   if bx <= x < bx + len(label)), k)
                         di = x - self.cw - 23  # 23: the columns around the client
@@ -1191,7 +1192,13 @@ class LogView:
                                 except RuntimeError as e:
                                     self.msg = str(e)
                             continue
-                        if k is None:  # any other click on the row clears the domain part
+                        if k is None and d and self.part and self.part[0] is cur and self.part[1] == d:
+                            # a second click on the bold part offers F6/F4 for it
+                            opts = [("Unblock " if verdict(cur)[0] == "BLOCK" else "Block ") + d,
+                                    ("Unignore " if self.ignored(cur) else "Ignore ") + d]
+                            i = choose(self.scr, d, opts)
+                            k = None if i is None else (curses.KEY_F6, curses.KEY_F4)[i]
+                        elif k is None:  # any other click on the row clears the domain part
                             self.part = (cur, d) if d else None
                     self.sel, self.pad = self.top + y - 1, 0
             page = self.body
