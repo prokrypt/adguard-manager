@@ -922,7 +922,7 @@ class LogView:
             if self.part and self.top + i == self.sel:
                 d, n = self.part[1], len(qname(e))
                 addstr(scr, 1 + i, cw + 23 + n - len(d), d[:max(0, name_shown(e, w, cw) - n + len(d))],
-                       (attr ^ curses.A_REVERSE) | curses.A_BOLD)
+                       attr | curses.A_BOLD)
             if self.top + i == self.sel:
                 for bx, label, _ in row_buttons(e, w):
                     addstr(scr, 1 + i, bx, label, curses.color_pair(color) | curses.A_BOLD)
@@ -1191,8 +1191,8 @@ class LogView:
                                 except RuntimeError as e:
                                     self.msg = str(e)
                             continue
-                        if k is None and d:
-                            self.part = (cur, d)
+                        if k is None:  # any other click on the row clears the domain part
+                            self.part = (cur, d) if d else None
                     self.sel, self.pad = self.top + y - 1, 0
             page = self.body
             last = max(0, len(self.rows) - 1)

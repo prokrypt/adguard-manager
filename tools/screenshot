@@ -168,6 +168,7 @@ class Fake(http.server.BaseHTTPRequestHandler):
 
 def render(screen, path):
     font = ImageFont.truetype(FONT, 16)
+    bold = ImageFont.truetype(FONT.replace(".ttf", "-Bold.ttf"), 16)
     cw = round(font.getlength("M"))
     ch = 20
     img = Image.new("RGB", (cw * screen.columns + 16, ch * screen.lines + 16), BG)
@@ -184,7 +185,7 @@ def render(screen, path):
             if bg != BG:
                 d.rectangle([px, py, px + cw - 1, py + ch - 1], fill=bg)
             if c.data.strip():
-                d.text((px, py + 1), c.data, font=font, fill=fg)
+                d.text((px, py + 1), c.data, font=bold if c.bold else font, fill=fg)
     img.save(path)
 
 
