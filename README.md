@@ -2,21 +2,7 @@
 
 A terminal (curses) front end for the [AdGuard Home](https://github.com/AdguardTeam/AdGuardHome) query log and custom filtering rules. Single Python file, standard library only.
 
-```
-Time     Client               Type  Status Domain
-12:00:03 laptop               A     BLOCK  ads.example.com
-12:00:02 10.0.0.6             A            tracker.foo.net
-12:00:00 laptop               A            example.org
-───────────────────────── Details ─────────────────────────
-     Time 2026-10-18 12:00:03.1-07:00
-   Client laptop (10.0.0.5) via DOH
-    Query ads.example.com  A
-   Result FilteredBlackList
-     Rule ||ads.example.com^  [AdGuard DNS filter]
- Response NOERROR: A 0.0.0.0 ttl 10s
- Upstream none  0.4ms
-F2Rules F3Client F4Ignore F5Refresh F6Unblock F7Show ign F8Auto 5s F9Logout F10Quit
-```
+![adguard-manager query log](docs/screenshot.png)
 
 ## Install
 

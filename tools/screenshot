@@ -78,35 +78,42 @@ class Stream(pyte.ByteStream):
 # ---------- fake AdGuard Home ----------
 
 CLIENTS = [("192.168.1.20", "laptop"), ("192.168.1.31", "living-room-tv"),
-           ("192.168.1.45", "phone"), ("192.168.1.50", "")]
-SAMPLE = [  # name, reason, rule, client index
-    ("82ce9f96c9668b26faa80167367901b357fd241534da35d1d756d0269a978bd.us-east-1.cdn.example.com", "NotFilteredNotFound", None, 0),
-    ("www.google.com", "NotFilteredNotFound", None, 0),
-    ("ads.doubleclick.net", "FilteredBlackList", "||doubleclick.net^", 1),
-    ("github.com", "NotFilteredNotFound", None, 0),
-    ("telemetry.tv-vendor.example", "FilteredBlackList", "||telemetry.tv-vendor.example^", 1),
-    ("api.weather.example", "NotFilteredNotFound", None, 2),
-    ("nas.lan", "Rewrite", None, 0),
-    ("graph.facebook.com", "FilteredBlackList", "||facebook.com^", 2),
-    ("cdn.jsdelivr.net", "NotFilteredWhiteList", "@@||cdn.jsdelivr.net^", 0),
-    ("time.apple.com", "NotFilteredNotFound", None, 2),
-    ("app-measurement.com", "FilteredBlackList", "||app-measurement.com^", 2),
-    ("pypi.org", "NotFilteredNotFound", None, 3),
-    ("netflix.com", "NotFilteredNotFound", None, 1),
-    ("tracking.example.net", "FilteredBlackList", "||tracking.example.net^", 3),
-    ("news.ycombinator.com", "NotFilteredNotFound", None, 0),
+           ("192.168.1.45", "pixel-8"), ("192.168.1.50", ""), ("192.168.1.62", "ipad"),
+           ("192.168.1.77", "thermostat")]
+SAMPLE = [  # name, reason, rule, client index, type
+    ("www.google.com", "NotFilteredNotFound", None, 0, "A"),
+    ("ads.doubleclick.net", "FilteredBlackList", "||doubleclick.net^", 1, "A"),
+    ("github.com", "NotFilteredNotFound", None, 0, "A"),
+    ("logs.netflix.com", "FilteredBlackList", "||logs.netflix.com^", 1, "AAAA"),
+    ("api.weather.com", "NotFilteredNotFound", None, 5, "A"),
+    ("connectivitycheck.gstatic.com", "NotFilteredNotFound", None, 2, "A"),
+    ("nas.lan", "Rewrite", None, 0, "A"),
+    ("graph.facebook.com", "FilteredBlackList", "||facebook.com^", 2, "HTTPS"),
+    ("cdn.jsdelivr.net", "NotFilteredWhiteList", "@@||cdn.jsdelivr.net^", 0, "A"),
+    ("time.apple.com", "NotFilteredNotFound", None, 4, "A"),
+    ("app-measurement.com", "FilteredBlackList", "||app-measurement.com^", 2, "A"),
+    ("82ce9f96c9668b26faa80167367901b357fd241534da35d1d756d0269a978bd.us-east-1.cdn.example.com", "NotFilteredNotFound", None, 0, "A"),
+    ("pypi.org", "NotFilteredNotFound", None, 3, "AAAA"),
+    ("samsungads.com", "FilteredBlackList", "||samsungads.com^", 1, "A"),
+    ("en.wikipedia.org", "NotFilteredNotFound", None, 4, "HTTPS"),
+    ("mtalk.google.com", "NotFilteredNotFound", None, 2, "A"),
+    ("pagead2.googlesyndication.com", "FilteredBlackList", "||googlesyndication.com^", 4, "A"),
+    ("news.ycombinator.com", "NotFilteredNotFound", None, 0, "A"),
+    ("firmware.ecobee.com", "NotFilteredNotFound", None, 5, "A"),
+    ("settings-win.data.microsoft.com", "FilteredBlackList", "||data.microsoft.com^", 3, "A"),
+    ("i.ytimg.com", "NotFilteredNotFound", None, 1, "AAAA"),
 ]
 
 
 def sample_log(n=60):
     out, now = [], time.time()
     for i in range(n):
-        name, reason, rule, c = SAMPLE[i % len(SAMPLE)]
+        name, reason, rule, c, qtype = SAMPLE[i % len(SAMPLE)]
         ip, cname = CLIENTS[c]
-        t = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now - 7 * i)) + ".000000+00:00"
+        t = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now - 7 * i - i * i % 5)) + ".000000+00:00"
         blocked = reason.startswith("Filtered")
         e = {"time": t, "client": ip, "client_proto": "", "client_info": {"name": cname},
-             "question": {"name": name, "type": "A", "class": "IN"}, "reason": reason,
+             "question": {"name": name, "type": qtype, "class": "IN"}, "reason": reason,
              "status": "NOERROR", "elapsedMs": "%.1f" % (3 + i % 7 * 4.3), "cached": i % 3 == 0,
              "upstream": "" if blocked or i % 3 == 0 else "https://dns.quad9.net/dns-query",
              "answer": [{"type": "A", "value": "0.0.0.0" if blocked else "93.184.216.%d" % (i % 250), "ttl": 300}],
