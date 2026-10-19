@@ -45,7 +45,7 @@ All commands are on function keys, so typing always filters.
 
 Typing filters the list (domain, client name or IP), Backspace edits, Esc clears. Arrows, PgUp/PgDn, Home/End move. In popups Enter chooses, Esc cancels; typing filters there too.
 
-Mouse: click a row to select it, click its [BLK]/[UBLK] or [IGN] button to press F6 or F4, the wheel moves the selection, click a footer key to press it, double-click chooses in popups. Hold Shift to select text with the mouse.
+Mouse: click a row to select it, click its [BLK]/[UBLK] or [IGN] button to press F6 or F4, the wheel moves the selection, click a footer key to press it, click an item in a popup to choose it. Hold Shift to select text with the mouse.
 
 ## How it works
 
