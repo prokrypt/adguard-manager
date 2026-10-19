@@ -110,6 +110,9 @@ def sample_log(n=60):
              "upstream": "" if blocked or i % 3 == 0 else "https://dns.quad9.net/dns-query",
              "answer": [{"type": "A", "value": "0.0.0.0" if blocked else "93.184.216.%d" % (i % 250), "ttl": 300}],
              "rules": [{"text": rule, "filter_list_id": 0 if rule.startswith("@@") else 1}] if rule else []}
+        if name == "www.google.com":
+            e["answer"][:0] = [{"type": "CNAME", "value": "www3.l.google.com.", "ttl": 300},
+                               {"type": "CNAME", "value": "edge.gvt1.net.", "ttl": 300}]
         if reason == "Rewrite":
             e["answer"] = [{"type": "A", "value": "192.168.1.2", "ttl": 10}]
         out.append(e)

@@ -3,7 +3,7 @@
 
 Keys are function keys: F2 custom rules manager, F3 filter by client, F4 ignore a domain
 (on a greyed row: un-ignore; the ignored list is the last item of its menu), F5 refresh,
-F6 block/unblock (or block the answer IPs, or remove the custom rule that blocked it), F7 show/hide ignored queries, F8 auto-refresh interval, F9 log out, F10 or Ctrl+Q quit.
+F6 block/unblock (or block the answer IPs or CNAMEs, or remove the custom rule that blocked it), F7 show/hide ignored queries, F8 auto-refresh interval, F9 log out, F10 or Ctrl+Q quit.
 Typing filters the list (domain, client name or IP); Esc clears it.
 On the selected row, clicking the client filters by it and clicking a domain label
 picks it and its parent domains for F4/F6.
@@ -950,7 +950,7 @@ class LogView:
             was = [r.get("text", "") for r in e.get("was_rules") or []]
             out.append(("Was", f"{e['was_reason']}  {', '.join(was)}  (at query time)", 0))
             out.append(("Note", "'now' is AdGuard's check by name only; rules that match"
-                        " answer IPs aren't applied there", curses.A_DIM))
+                        " answer IPs or CNAMEs aren't applied there", curses.A_DIM))
         for r in e.get("rules") or []:
             name = self.lists.get(r.get("filter_list_id"), f"list {r.get('filter_list_id')}")
             out.append(("Rule", f"{r.get('text', '')}  [{name}]", 0))
@@ -1053,14 +1053,21 @@ class LogView:
         mine = [t for t in dict.fromkeys(r.get("text", "") for r in cur.get("rules") or [])
                 if unblock and not t.startswith("@@") and t in (r.strip() for r in rules)]
         ips = [] if unblock else [a["value"] for a in cur.get("answer") or [] if a.get("type") in ("A", "AAAA")]
+        cnames = [] if unblock else list(dict.fromkeys(a["value"].lower().rstrip(".") for a in cur.get("answer") or []
+                                                       if a.get("type") == "CNAME"))
+        if not self.part:  # AdGuard also matches ||d^ against the answer's CNAMEs
+            opts += [d for c in cnames for d in levels(c) if d not in opts]
+        extra = [(f"Its answer IPs: {', '.join(ips)}", [f"||{ip}^" for ip in ips])] if ips else []
+        if len(cnames) > 1:
+            extra.append((f"All its CNAMEs: {', '.join(cnames)}", [f"||{c}^" for c in cnames]))
         # A clicked domain part is used directly, without the menu.
         i = len(mine) if self.part else choose(
             self.scr, "Unblock" if unblock else "Block", [f"Remove {t}" for t in mine] +
-            [f"{d} and its subdomains" for d in opts] + ([f"Its answer IPs: {', '.join(ips)}"] if ips else []))
+            [f"{d} and its subdomains" for d in opts] + [label for label, _ in extra])
         if i is None:
             return
-        if i == len(mine) + len(opts):
-            return self.block_ips(cur, ips)
+        if i >= len(mine) + len(opts):
+            return self.add_blocks(cur, extra[i - len(mine) - len(opts)][1])
         ops = []
         if i < len(mine):
             at = next(j for j, r in enumerate(rules) if r.strip() == mine[i])
@@ -1101,17 +1108,17 @@ class LogView:
         done = "; ".join(("Removed " if op == "del" else "Added ") + r for op, r, _ in ops)
         self.msg = f"{done}; {name} is now {verdict(check)[0] or 'not blocked'} (F6 again undoes)"
 
-    def block_ips(self, cur, ips):
-        """Block responses carrying any of these IPs (one ||ip^ rule each); F6 again undoes."""
+    def add_blocks(self, cur, add):
+        """Add these block rules (answer IPs or CNAMEs), skipping ones already there; F6 again undoes."""
         rules = self.api.user_rules()
         have = {r.strip() for r in rules}
         ops = []
-        for ip in dict.fromkeys(ips):
-            if f"||{ip}^" not in have:
-                rules.append(f"||{ip}^")
-                ops.append(("add", f"||{ip}^", len(rules) - 1))
+        for rule in dict.fromkeys(add):
+            if rule not in have:
+                rules.append(rule)
+                ops.append(("add", rule, len(rules) - 1))
         if not ops:
-            self.msg = "No change: those IPs are already blocked"
+            self.msg = "No change: those rules are already there"
             return
         self.api.set_user_rules(rules)
         for key in ("reason", "rules", "service_name"):
