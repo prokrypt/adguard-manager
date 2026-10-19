@@ -9,11 +9,13 @@ filter are kept in ~/.config/adguard-manager, mode 600. That file is written
 at login, and on exit if the ignore list or client filter changed or you
 logged out.
 """
+import concurrent.futures
 import curses
 import json
 import os
 import sys
 import textwrap
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -24,12 +26,13 @@ CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.
 DEFAULT_URL = "http://adguard.lan"
 COOKIE_NAME = "agh_session"
 TIMEOUT = 10
-LOG_LIMIT = 500      # first load: a screenful at once, the rest in pages between keys
+LOG_LIMIT = 500      # first load: a screenful at once, the rest in pages in the background
 FIRST_PAGES = (20, 100)  # page sizes for the first load (the last one repeats)
 DETAIL_ROWS = 8      # details pane below the list (plus its separator line); grows for long entries
 AUTO = (5, 10, 30, 0)    # F8 cycles the auto-refresh interval in seconds (0 = off)
 PAGES = (20, 100, 500)  # refresh page sizes: small first, bigger only for a long gap
 KEEP = 5000          # entries kept in memory per view
+PAD = 4              # rows kept visible above and below the selection while scrolling
 
 
 class AuthError(Exception):
@@ -162,6 +165,26 @@ def footer(win, keys, msg=""):
         addstr(win, h - 1, kx + len(key), label, curses.A_REVERSE)
     if msg:
         addstr(win, h - 1, max(x + 1, w - len(msg) - 1), msg)
+
+
+def scroll(top, sel, body, n, pad=PAD):
+    """First row to show so sel is on screen with pad rows around it where the list allows."""
+    pad = min(pad, (body - 1) // 2)
+    top = min(max(top, sel - body + 1 + pad), sel - pad)
+    return max(0, min(top, n - body))
+
+
+def in_thread(fn, *args):
+    """Run fn(*args) in a daemon thread (quitting never waits on it); returns a Future."""
+    fut = concurrent.futures.Future()
+
+    def run():
+        try:
+            fut.set_result(fn(*args))
+        except BaseException as e:
+            fut.set_exception(e)
+    threading.Thread(target=run, daemon=True).start()
+    return fut
 
 
 WHEEL_DOWN = getattr(curses, "BUTTON5_PRESSED", 0x200000)  # Python < 3.10 lacks the name
@@ -313,6 +336,7 @@ def choose(scr, title, items, hint="Type to filter  Enter: choose  Esc/F10: canc
 def _choose(scr, title, items, hint):
     sel = top = 0
     typed = ""
+    pad = PAD
     while True:
         shown = [i for i, item in enumerate(items) if typed.lower() in item.lower()]
         sel = min(sel, max(0, len(shown) - 1))
@@ -327,7 +351,8 @@ def _choose(scr, title, items, hint):
         if typed:
             addstr(win, 1, 2, f"filter: {typed}"[: bw - 4], curses.A_BOLD)
         body = bh - 4
-        top = min(max(top, sel - body + 1), sel)
+        top = scroll(top, sel, body, len(shown), pad)
+        pad = PAD
         for row, i in enumerate(shown[top: top + body]):
             attr = curses.A_REVERSE if top + row == sel else 0
             addstr(win, 2 + row, 2, items[i][: bw - 4].ljust(bw - 4), attr)
@@ -338,7 +363,7 @@ def _choose(scr, title, items, hint):
             k, y, x = mouse(scr)
             row = y - by - 2
             if 0 <= row < body and top + row < len(shown) and bx < x < bx + bw - 1:
-                sel = top + row
+                sel, pad = top + row, 0  # a click doesn't scroll, so a double click hits the same row
             elif k == "\n":
                 k = None  # double click outside the list
         last = max(0, len(shown) - 1)
@@ -416,6 +441,7 @@ class RulesView:
         self.rules, self.rows, self.typed, self.msg = [], [], "", ""
         self.top = self.sel = 0
         self.body = 1
+        self.pad = PAD  # 0 for one draw after a click, so the clicked row stays put
 
     def load(self):
         self.rules = self.api.user_rules()
@@ -444,10 +470,8 @@ class RulesView:
             head = head.ljust(max(len(head), w - len(self.typed) - 10)) + f"  filter: {self.typed}"
         addstr(scr, 0, 0, head.ljust(w), curses.A_REVERSE | curses.A_BOLD)
         body = self.body = max(1, h - 2)
-        if self.sel < self.top:
-            self.top = self.sel
-        elif self.sel >= self.top + body:
-            self.top = self.sel - body + 1
+        self.top = scroll(self.top, self.sel, body, len(self.rows), self.pad)
+        self.pad = PAD
         for row, (i, r) in enumerate(self.rows[self.top: self.top + body]):
             s = r.strip()
             attr = (curses.A_DIM if s.startswith("#") or s.startswith("!") else
@@ -535,7 +559,7 @@ class RulesView:
             if k == curses.KEY_MOUSE:
                 k, y, _ = mouse(self.scr, self.KEYS)
                 if 0 <= y - 1 < self.body and self.top + y - 1 < len(self.rows):
-                    self.sel = self.top + y - 1
+                    self.sel, self.pad = self.top + y - 1, 0
             last = max(0, len(self.rows) - 1)
             if k in (curses.KEY_F10, curses.KEY_F2):
                 return
@@ -632,6 +656,8 @@ class LogView:
         self.client = tuple(conf["client"]) if conf.get("client") else None
         self.typed = ""     # type-to-filter text: matches domain, client name or IP
         self.body = 1       # list rows on screen, set by draw()
+        self.pad = PAD      # 0 for one draw after a click, so the clicked row stays put
+        self.job = None     # (kind, search, list it extends, Future) while a background fetch runs
         self.lists = {}     # filter list id -> name, for the details pane
         self.more = {}      # search string -> older_than cursor while the first load continues
         self.auto = AUTO[0]
@@ -692,27 +718,27 @@ class LogView:
             self.sel = self.rows.index(keep) if keep is not None and keep in self.rows else 0
         elif keep is not None and keep in self.rows:
             # New rows came in on top: stay on the same entry, unless we were at the top.
-            added = self.rows.index(keep) - self.sel
+            # The view stays put, so the entry moves down until draw() hits the padding.
             if self.sel:
-                self.sel += added
-                self.top += added
+                self.sel = self.rows.index(keep)
         elif keep is None and old == 0:
             self.sel = self.top = 0
         self.sel = min(self.sel, max(0, len(self.rows) - 1))
         hidden = sum(1 for e in self.all if any(covers(d, qname(e)) for d in self.ignore))
         self.msg = f"{len(self.rows)} shown" + (f", {hidden} ignored" if hidden else "")
 
-    def refresh(self, auto=False):
+    def refresh(self):
         self.last = time.monotonic()
         if not self.all:
-            self.first_load()
+            self.got_first(*self.api.querylog(FIRST_PAGES[0], self.search))
             return
-        if not auto:
-            self.msg = "Loading…"
-            self.draw()
+        self.msg = "Loading…"
+        self.draw()
+        self.got_new(*fetch_new(self.api, self.search, self.all))
+
+    def got_new(self, new, complete, auto=False):
         keep, msg = self.current(), self.msg
         # The server's search also matches domains, so apply() narrows it to the client.
-        new, complete = fetch_new(self.api, self.search, self.all)
         self.cache[self.search] = (new + self.all if complete else new)[:KEEP]
         if not complete:
             self.more.pop(self.search, None)
@@ -722,31 +748,27 @@ class LogView:
         else:
             self.msg = f"{len(new)} new; " + self.msg
 
-    def first_load(self):
-        """First page only: enough to fill the screen. load_more() fetches the rest."""
-        page, older = self.api.querylog(FIRST_PAGES[0], self.search)
+    def got_first(self, page, older):
+        """First page only: enough to fill the screen. got_more() adds the rest."""
         self.cache[self.search] = page
         self.more[self.search] = older if len(page) == FIRST_PAGES[0] and older else None
         self.apply()
 
-    def load_more(self):
-        """One more page of the first load, run while no key is waiting."""
-        try:
-            limit = FIRST_PAGES[-1]  # full pages: whatever comes back is kept, even past LOG_LIMIT
-            page, older = self.api.querylog(limit, self.search, self.more[self.search])
-        except RuntimeError:
-            self.more[self.search] = None
-            raise
+    def got_more(self, page, older):
+        """One more page of the first load."""
         rows = self.all + page
         self.cache[self.search] = rows
-        done = len(page) < limit or not older or len(rows) >= LOG_LIMIT
+        # full pages: whatever comes back is kept, even past LOG_LIMIT
+        done = len(page) < FIRST_PAGES[-1] or not older or len(rows) >= LOG_LIMIT
         self.more[self.search] = None if done else older
         self.apply(self.current())
         if not done:
             self.msg = f"loading {len(rows)}/{LOG_LIMIT}… " + self.msg
 
     def wait_ms(self):
-        """How long the key wait may block before the next background job."""
+        """How long the key wait may block before idle() runs."""
+        if self.job:
+            return 50  # poll for the background fetch
         if self.more.get(self.search):
             return 0
         if not self.auto:
@@ -754,14 +776,38 @@ class LogView:
         return max(0, int((self.last + self.auto - time.monotonic()) * 1000))
 
     def idle(self):
-        try:
-            if self.more.get(self.search):
-                self.load_more()
+        """No key came: start the due fetch in a thread, so keys keep working while it waits
+        on the network, or take in its result once it is done."""
+        if not self.job:
+            search = self.search
+            if self.more.get(search):
+                kind, fn, args = "more", self.api.querylog, (FIRST_PAGES[-1], search, self.more[search])
             else:
-                self.refresh(auto=True)
+                self.last = time.monotonic()
+                kind, fn, args = (("new", fetch_new, (self.api, search, self.all)) if self.all else
+                                  ("first", self.api.querylog, (FIRST_PAGES[0], search)))
+            self.job = (kind, search, self.cache.get(search), in_thread(fn, *args))
+            return
+        kind, search, base, fut = self.job
+        if not fut.done():
+            return
+        self.job = None
+        if search != self.search or self.cache.get(search) is not base:
+            return  # F5 or a client switch replaced the list meanwhile; fetch again later
+        try:
+            got = fut.result()
         except RuntimeError as e:
+            if kind == "more":
+                self.more[search] = None
             self.msg = str(e)
             self.last = time.monotonic()  # retry after a full interval, not in a tight loop
+            return
+        if kind == "more":
+            self.got_more(*got)
+        elif kind == "first":
+            self.got_first(*got)
+        else:
+            self.got_new(*got, auto=True)
 
     def cycle_auto(self):
         self.auto = AUTO[(AUTO.index(self.auto) + 1) % len(AUTO)]
@@ -789,10 +835,8 @@ class LogView:
         room = h - 2 - 1 - 5
         dh = min(max(DETAIL_ROWS, len(lines)), room) + 1 if room >= DETAIL_ROWS else 0
         body = self.body = max(1, h - 2 - dh)
-        if self.sel < self.top:
-            self.top = self.sel
-        elif self.sel >= self.top + body:
-            self.top = self.sel - body + 1
+        self.top = scroll(self.top, self.sel, body, len(self.rows), self.pad)
+        self.pad = PAD
         for i, e in enumerate(self.rows[self.top: self.top + body]):
             q = e.get("question") or {}
             label, color = verdict(e)
@@ -987,7 +1031,7 @@ class LogView:
             if k == curses.KEY_MOUSE:
                 k, y, _ = mouse(self.scr, self.keys())
                 if 0 <= y - 1 < self.body and self.top + y - 1 < len(self.rows):
-                    self.sel = self.top + y - 1
+                    self.sel, self.pad = self.top + y - 1, 0
             page = self.body
             last = max(0, len(self.rows) - 1)
             if k == curses.KEY_F10:
