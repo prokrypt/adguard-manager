@@ -363,7 +363,7 @@ def _choose(scr, title, items, hint):
             k, y, x = mouse(scr)
             row = y - by - 2
             if 0 <= row < body and top + row < len(shown) and bx < x < bx + bw - 1:
-                sel, pad = top + row, 0  # a click doesn't scroll, so a double click hits the same row
+                sel, k = top + row, "\n"  # one click chooses
             elif k == "\n":
                 k = None  # double click outside the list
         last = max(0, len(shown) - 1)
