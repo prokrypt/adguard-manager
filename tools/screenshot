@@ -30,7 +30,6 @@ import time
 import urllib.parse
 
 import pyte
-from PIL import Image, ImageDraw, ImageFont
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TERM = "xterm-256color"
@@ -173,7 +172,8 @@ class Fake(http.server.BaseHTTPRequestHandler):
 
 # ---------- terminal ----------
 
-def render(screen, path):
+def render_image(screen):
+    from PIL import Image, ImageDraw, ImageFont
     font = ImageFont.truetype(FONT, 16)
     bold = ImageFont.truetype(FONT.replace(".ttf", "-Bold.ttf"), 16)
     cw = round(font.getlength("M"))
@@ -193,7 +193,11 @@ def render(screen, path):
                 d.rectangle([px, py, px + cw - 1, py + ch - 1], fill=bg)
             if c.data.strip():
                 d.text((px, py + 1), c.data, font=bold if c.bold else font, fill=fg)
-    img.save(path)
+    return img
+
+
+def render(screen, path):
+    render_image(screen).save(path)
 
 
 def main():
