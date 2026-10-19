@@ -38,7 +38,7 @@ TI = {"Up": "kcuu1", "Down": "kcud1", "Right": "kcuf1", "Left": "kcub1", "PgUp":
 OTHER = {"Enter": "\r", "Esc": "\x1b", "Tab": "\t", "Bksp": "\x7f"}
 COLORS = {"default": None, "black": "#000000", "red": "#e05555", "green": "#55c060",
           "brown": "#d0b040", "yellow": "#d0b040", "blue": "#5080e0", "magenta": "#c060c0",
-          "cyan": "#40c0c8", "white": "#e0e0e0"}
+          "cyan": "#40c0c8", "white": "#e0e0e0", "brightblack": "#808080"}
 FG, BG = "#d8d8d8", "#1c1c1c"
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 
