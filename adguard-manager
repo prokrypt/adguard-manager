@@ -6,8 +6,8 @@ Keys are function keys: F2 custom rules manager, F3 filter by client, F4 ignore 
 F6 block/unblock (or block the answer IPs or CNAMEs, or remove the custom rule that blocked it), F7 show/hide ignored queries, F8 auto-refresh interval, F9 log out, F10 or Ctrl+Q quit.
 Typing filters the list (domain, client name or IP); Esc clears it.
 On the selected row, clicking the client filters by it and clicking a domain label
-picks it and its parent domains for F4/F6. Keys: Left picks the client, Right the domain
-(again: shorter), Enter acts on the pick, or with no pick asks block or ignore.
+picks it and its parent domains for F4/F6. Keys: Right picks the domain (again: shorter),
+Left a longer part or the client, Enter acts on the pick, or with no pick asks block or ignore.
 The session cookie (never the password), the ignore list and the client
 filter are kept in ~/.config/adguard-manager.json, mode 600. That file is written
 at login, and on exit if the ignore list or client filter changed or you
@@ -998,16 +998,19 @@ class LogView:
             self.set_client(ip, label)
 
     def row_key(self, k):
-        """Left picks the client, Right the whole domain and then shorter parts of it, Enter acts
-        on the pick (filter by the client, or the block/ignore menu). Returns an F key to run, or None."""
+        """Right picks the whole domain and then shorter parts of it, Left longer ones and then the
+        client; Enter acts on the pick (filter by the client, or the block/ignore menu).
+        Returns an F key to run, or None."""
         cur = self.current()
         if not cur or not qname(cur):
             return None
-        if k == curses.KEY_LEFT:
+        opts = levels(qname(cur))
+        d = self.part[1] if self.part else None
+        if k == curses.KEY_LEFT and d in opts[1:]:  # a partial pick grows back one level
+            self.part = (cur, opts[opts.index(d) - 1])
+        elif k == curses.KEY_LEFT:
             self.part, self.on_client = None, cur
         elif k == curses.KEY_RIGHT:
-            opts = levels(qname(cur))
-            d = self.part[1] if self.part else None
             self.part = (cur, opts[min(opts.index(d) + 1, len(opts) - 1)] if d in opts else opts[0])
             self.on_client = None
         elif self.on_client:
