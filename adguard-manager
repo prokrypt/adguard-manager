@@ -2,7 +2,7 @@
 """adguard-manager: curses front end for the AdGuard Home query log.
 
 Keys are function keys: F2 custom rules manager, F3 filter by client, F4 ignore a domain, F5 refresh,
-F6 block/unblock, F7 ignored list, F8 auto-refresh interval, F9 log out, F10 quit.
+F6 block/unblock, F7 ignored list, F8 auto-refresh interval, F9 log out, F10 or Ctrl+Q quit.
 Typing filters the list (domain, client name or IP); Esc clears it.
 The session cookie (never the password), the ignore list and the client
 filter are kept in ~/.config/adguard-manager, mode 600. That file is written
@@ -14,6 +14,7 @@ import curses
 import json
 import os
 import sys
+import termios
 import textwrap
 import threading
 import time
@@ -264,7 +265,7 @@ def login_form(scr, url, name="", error=""):
         f = fields[cur]
         scr.move(top + 3 + cur, min(w - 1, left + 11 + f.pos))
         k = scr.get_wch()
-        if k in (curses.KEY_F10, "\x1b"):
+        if k in (curses.KEY_F10, "\x1b", "\x11"):
             return None
         if k == curses.KEY_RESIZE:
             continue
@@ -1050,7 +1051,7 @@ class LogView:
                     self.sel, self.pad = self.top + y - 1, 0
             page = self.body
             last = max(0, len(self.rows) - 1)
-            if k == curses.KEY_F10:
+            if k in (curses.KEY_F10, "\x11"):  # F10 / Ctrl+Q
                 return "quit"
             if k == curses.KEY_F9:
                 return "logout"
@@ -1083,6 +1084,11 @@ def main(scr):
     curses.init_pair(3, curses.COLOR_CYAN, -1)
     curses.curs_set(0)
     curses.mousemask(curses.ALL_MOUSE_EVENTS)  # Shift+drag still selects text in most terminals
+    # Turn off XON/XOFF so Ctrl+Q reaches us; curses.wrapper restores the tty on exit.
+    attrs = termios.tcgetattr(sys.stdin)
+    attrs[0] &= ~termios.IXON
+    termios.tcsetattr(sys.stdin, termios.TCSANOW, attrs)
+    curses.def_prog_mode()
     conf = load_conf()
     try:
         while True:
