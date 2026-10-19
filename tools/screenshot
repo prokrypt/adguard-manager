@@ -42,6 +42,38 @@ COLORS = {"default": None, "black": "#000000", "red": "#e05555", "green": "#55c0
 FG, BG = "#d8d8d8", "#1c1c1c"
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 
+
+
+class Screen(pyte.Screen):
+    """pyte plus the xterm sequences ncurses uses that pyte lacks: REP (CSI b), SU/SD (CSI S/T)."""
+    last = " "
+
+    def draw(self, data):
+        super().draw(data)
+        self.last = data[-1:] or self.last
+
+    def repeat(self, n=1, *args, **kw):
+        self.draw(self.last * n)
+
+    def scroll_up(self, n=1, *args, **kw):
+        y, x = self.cursor.y, self.cursor.x
+        self.cursor.y = self.margins.bottom if self.margins else self.lines - 1
+        for _ in range(n or 1):
+            self.index()
+        self.cursor.y, self.cursor.x = y, x
+
+    def scroll_down(self, n=1, *args, **kw):
+        y, x = self.cursor.y, self.cursor.x
+        self.cursor.y = self.margins.top if self.margins else 0
+        for _ in range(n or 1):
+            self.reverse_index()
+        self.cursor.y, self.cursor.x = y, x
+
+
+class Stream(pyte.ByteStream):
+    csi = {**pyte.ByteStream.csi, "b": "repeat", "S": "scroll_up", "T": "scroll_down"}
+
+
 # ---------- fake AdGuard Home ----------
 
 CLIENTS = [("192.168.1.20", "laptop"), ("192.168.1.31", "living-room-tv"),
@@ -167,8 +199,8 @@ def main():
         json.dump({"url": "http://127.0.0.1:%d" % srv.server_port, "cookie": "agh_session=fake"}, f)
 
     curses.setupterm(TERM, sys.stdout.fileno())  # key sequences as the app's curses expects them
-    screen = pyte.Screen(cols, rows)
-    stream = pyte.ByteStream(screen)
+    screen = Screen(cols, rows)
+    stream = Stream(screen)
     pid, fd = pty.fork()
     if pid == 0:
         fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))

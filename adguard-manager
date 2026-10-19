@@ -335,7 +335,8 @@ def choose(scr, title, items, hint="Type to filter  Enter: choose  Esc/F10: canc
     try:
         return _choose(scr, title, items, hint)
     finally:
-        scr.touchwin()  # repaint what the popup covered
+        scr.touchwin()  # repaint what the popup covered, now: a popup opened next
+        scr.refresh()   # (shorter ignored list) would leave the old one's edges
 
 
 def _choose(scr, title, items, hint):
@@ -436,6 +437,7 @@ def ask(scr, title, value=""):
     finally:
         curses.curs_set(0)
         scr.touchwin()
+        scr.refresh()
 
 
 def confirm(scr, question):
