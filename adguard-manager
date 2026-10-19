@@ -623,6 +623,15 @@ def covers(domain, name):
     return name == domain or name.endswith("." + domain)
 
 
+def row_buttons(entry, w):
+    """[(x, label, key)] for the buttons right-justified on the selected row."""
+    out, x = [], w
+    for label, k in (("[IGN]", curses.KEY_F4), ("[UBLK]" if verdict(entry)[0] == "BLOCK" else "[BLK]", curses.KEY_F6)):
+        x -= len(label) + 1
+        out.append((x, label, k))
+    return out
+
+
 def key(entry):
     q = entry.get("question") or {}
     return entry.get("time"), entry.get("client"), q.get("name"), q.get("type")
@@ -846,6 +855,9 @@ class LogView:
             if self.top + i == self.sel:
                 attr |= curses.A_REVERSE
             addstr(scr, 1 + i, 0, line.ljust(w), attr)
+            if self.top + i == self.sel:
+                for bx, label, _ in row_buttons(e, w):
+                    addstr(scr, 1 + i, bx, label, curses.color_pair(color) | curses.A_BOLD)
         if dh:
             addstr(scr, 1 + body, 0, " Details ".center(w, "─"), curses.A_BOLD)
             for i, (label, text, attr) in enumerate(lines[: dh - 1]):
@@ -1029,8 +1041,12 @@ class LogView:
                 self.idle()
                 continue
             if k == curses.KEY_MOUSE:
-                k, y, _ = mouse(self.scr, self.keys())
+                k, y, x = mouse(self.scr, self.keys())
                 if 0 <= y - 1 < self.body and self.top + y - 1 < len(self.rows):
+                    if self.top + y - 1 == self.sel:  # buttons only show on the selected row
+                        w = self.scr.getmaxyx()[1]
+                        k = next((bk for bx, label, bk in row_buttons(self.rows[self.sel], w)
+                                  if bx <= x < bx + len(label)), k)
                     self.sel, self.pad = self.top + y - 1, 0
             page = self.body
             last = max(0, len(self.rows) - 1)
