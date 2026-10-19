@@ -18,7 +18,7 @@ Notes for making changes. User-facing docs are in README.md.
 | `load_conf`/`save_conf` | JSON at `$XDG_CONFIG_HOME/adguard-manager.json`, mode 600 (an old `adguard-manager` file is renamed on load until 2026-10-26; then drop `OLD_CONF`). Keys: `url`, `cookie`, `ignore`, `client` |
 | curses helpers | `addstr` (clips, never raises), `footer`/`footer_layout`, `scroll`, `in_thread`, `mouse`, `Field` |
 | popups | `login_form`, `choose` (filterable list), `ask` (one-line input), `confirm` |
-| `RulesView` | F2 screen: custom rules list, edit/add/delete via `change()` |
+| `RulesView` | F2 screen: custom rules list; edit/add/delete change `rules` locally and log `ops`; Back (`leave()`) asks, then `submit()` |
 | log helpers | `verdict`, `client_name`, `qname`, `levels`, `covers`, `clip`, `row_buttons`, `key`, `fetch_new` |
 | `LogView` | main screen: query log, details pane, F-key actions, background fetching |
 | `main` | colors, mouse, IXON off, login loop, write conf on exit if changed |
@@ -42,7 +42,7 @@ Notes for making changes. User-facing docs are in README.md.
 - Background: `wait_ms()` sets the `get_wch` timeout, and on timeout `idle()` either starts one job via `in_thread` or collects it. `self.job = (kind, search, base list, Future)`. The result is thrown away if the view switched or the list object changed (`is not base`), so a manual F5 always wins.
 - F-key actions (F5, F6, rules) make network calls on the main thread and block. Only idle fetches run in a thread. A view that blocks for long (`RulesView.run`) calls `scr.timeout(-1)`, and `LogView.run` resets it on exit for the login form.
 - F6 stores undo state on the entry dict itself: `f6` (ops list) and `was_reason`/`was_rules`/`was_service_name`. Prepending new entries keeps the same dicts; a full list replacement loses it.
-- Rule edits always re-read rules from the server first (`user_rules()`), change that list, then `set_user_rules()`, so web UI edits made meanwhile are kept. Keep this when adding rule operations.
+- Rule edits always re-read rules from the server first (`user_rules()`), change that list, then `set_user_rules()`, so web UI edits made meanwhile are kept. Keep this when adding rule operations. `RulesView` batches: it compares the fresh list to `saved` (as loaded) and, if they differ, replays `ops` by rule text.
 - `check_host` matches by name only; answer-IP rules don't show there, so `toggle_block` still adds the allow rule when other rules matched.
 
 ## Drawing

@@ -458,12 +458,14 @@ class RulesView:
     def __init__(self, scr, api):
         self.scr, self.api = scr, api
         self.rules, self.rows, self.typed, self.msg = [], [], "", ""
+        self.saved, self.ops, self.result = [], [], ""
         self.top = self.sel = 0
         self.body = 1
         self.pad = PAD  # 0 for one draw after a click, so the clicked row stays put
 
     def load(self):
         self.rules = self.api.user_rules()
+        self.saved, self.ops = list(self.rules), []  # changes stay local until Back submits them
         self.apply(jump_end=True)
 
     def apply(self, keep=None, jump_end=False):
@@ -476,6 +478,8 @@ class RulesView:
             self.sel = next((n for n, (i, _) in enumerate(self.rows) if i >= keep), len(self.rows) - 1)
         self.sel = max(0, min(self.sel, len(self.rows) - 1))
         self.msg = f"{len(self.rows)} of {len(self.rules)} rules" if self.typed else f"{len(self.rules)} rules"
+        if self.rules != self.saved:
+            self.msg += ", not saved yet"
 
     def current(self):
         return self.rows[self.sel] if self.rows else None
@@ -501,30 +505,28 @@ class RulesView:
         footer(scr, self.KEYS, self.msg)
         scr.refresh()
 
-    def change(self, what, fn):
-        """Re-read the rules, let fn edit the fresh list, save it.
+    def submit(self):
+        """Send the local changes. Re-reads the rules first: if they changed on the server
+        meanwhile (web interface), the edits are replayed on that list by rule text."""
+        fresh = self.api.user_rules()
+        if fresh != self.saved:
+            for kind, old, new in self.ops:
+                if kind == "add":
+                    if new not in fresh:
+                        fresh.append(new)
+                elif old in fresh:
+                    if kind == "edit":
+                        fresh[fresh.index(old)] = new
+                    else:
+                        fresh.remove(old)
+            self.rules = fresh
+        self.api.set_user_rules(self.rules)
+        return f"Rules saved ({len(self.ops)} changes)"
 
-        fn gets (rules, index of the selected rule in them or None) and returns a message.
-        Reading first keeps edits made meanwhile in the web interface."""
-        cur = self.current()
-        rules = self.api.user_rules()
-        at = None
-        if cur:
-            i, text = cur
-            at = i if i < len(rules) and rules[i] == text else next(
-                (n for n, r in enumerate(rules) if r == text), None)
-        if cur and at is None and what != "add":
-            self.rules = rules
-            self.apply()
-            self.msg = "That rule changed on the server; reloaded"
-            return
-        msg = fn(rules, at)
-        if msg is None:
-            return
-        self.api.set_user_rules(rules)
-        self.rules = rules
-        self.apply(keep=at if what != "add" else None, jump_end=what == "add")
-        self.msg = msg
+    def changed(self, kind, old, new, msg, at=None):
+        self.ops.append((kind, old, new))
+        self.apply(keep=at, jump_end=at is None)
+        self.msg = msg + "; " + self.msg
 
     def edit(self):
         cur = self.current()
@@ -533,55 +535,78 @@ class RulesView:
         new = ask(self.scr, f"Edit rule {cur[0] + 1}", cur[1])
         if new is None or new == cur[1]:
             return
-
-        def fn(rules, at):
-            rules[at] = new
-            return f"Rule {at + 1} changed"
-        self.change("edit", fn)
+        self.rules[cur[0]] = new
+        self.changed("edit", cur[1], new, f"Rule {cur[0] + 1} changed", cur[0])
 
     def add(self):
         new = ask(self.scr, "Add rule (goes at the end)")
         if not new or not new.strip():
             return
-
-        def fn(rules, at):
-            if new.strip() in (r.strip() for r in rules):
-                self.msg = f"{new.strip()} is already there"
-                return None
-            rules.append(new.strip())
-            return f"Added {new.strip()}"
+        new = new.strip()
+        if new in (r.strip() for r in self.rules):
+            self.msg = f"{new} is already there"
+            return
         if self.typed and self.typed.lower() not in new.lower():
             self.typed = ""  # make sure the new rule is visible
-        self.change("add", fn)
+        self.rules.append(new)
+        self.changed("add", None, new, f"Added {new}")
 
     def delete(self):
         cur = self.current()
-        if not cur or not confirm(self.scr, f"Delete rule {cur[0] + 1}: {cur[1]}?"):
+        if not cur:
             return
+        del self.rules[cur[0]]
+        self.changed("delete", cur[1], None, f"Deleted {cur[1]}", cur[0])
 
-        def fn(rules, at):
-            gone = rules.pop(at)
-            return f"Deleted {gone}"
-        self.change("delete", fn)
+    def menu(self):
+        """Enter, or a click on the selected row."""
+        cur = self.current()
+        if cur:
+            c = choose(self.scr, f"Rule {cur[0] + 1}: {cur[1]}", ["Edit", "Delete"])
+            if c is not None:
+                (self.edit, self.delete)[c]()
+
+    def reload(self):
+        if self.rules != self.saved and not confirm(self.scr, "Discard changes and reload?"):
+            return
+        self.load()
+
+    def leave(self):
+        """Back: True to leave. Asks to submit when there are changes."""
+        if self.rules == self.saved:
+            return True
+        c = choose(self.scr, "Submit changes?", ["Yes", "No", "Cancel"], "Enter: choose  Esc: cancel")
+        if c == 0:
+            self.result = self.submit()
+        return c in (0, 1)
 
     def run(self):
+        """Returns a message for the log view ("" if nothing was submitted)."""
         self.scr.timeout(-1)
         try:
             self.load()
         except RuntimeError as e:
             self.msg = str(e)
-        actions = {curses.KEY_F4: self.edit, curses.KEY_F5: self.load,
-                   curses.KEY_F7: self.add, curses.KEY_F8: self.delete}
+        actions = {curses.KEY_F4: self.edit, curses.KEY_F5: self.reload, curses.KEY_F7: self.add,
+                   curses.KEY_F8: self.delete, curses.KEY_DC: self.delete,
+                   "\n": self.menu, "\r": self.menu, curses.KEY_ENTER: self.menu}
         while True:
             self.draw()
             k = self.scr.get_wch()
             if k == curses.KEY_MOUSE:
                 k, y, _ = mouse(self.scr, self.KEYS)
                 if 0 <= y - 1 < self.body and self.top + y - 1 < len(self.rows):
+                    if k is None and self.sel == self.top + y - 1:
+                        k = "\n"  # click on the selected row
                     self.sel, self.pad = self.top + y - 1, 0
             last = max(0, len(self.rows) - 1)
-            if k in (curses.KEY_F10, curses.KEY_F2):
-                return
+            if k in (curses.KEY_F10, curses.KEY_F2) or k == "\x1b" and not self.typed:
+                try:
+                    if self.leave():
+                        return self.result
+                except RuntimeError as e:
+                    self.msg = str(e)
+                continue
             if k in actions:
                 try:
                     actions[k]()
@@ -1180,7 +1205,7 @@ class LogView:
         self.msg = "Undone: " + "; ".join(undone)
 
     def rules_view(self):
-        RulesView(self.scr, self.api).run()
+        self.msg = RulesView(self.scr, self.api).run() or self.msg
         self.last = time.monotonic()  # auto refresh paused meanwhile; don't fire straight away
 
     def run(self):
