@@ -32,6 +32,7 @@ DETAIL_ROWS = 8      # details pane below the list (plus its separator line); gr
 AUTO = (5, 10, 30, 0)    # F8 cycles the auto-refresh interval in seconds (0 = off)
 PAGES = (20, 100, 500)  # refresh page sizes: small first, bigger only for a long gap
 KEEP = 5000          # entries kept in memory per view
+CLIENT_MAX = 24      # widest the client column gets; longer names end in "..."
 PAD = 4              # rows kept visible above and below the selection while scrolling
 
 
@@ -623,6 +624,10 @@ def covers(domain, name):
     return name == domain or name.endswith("." + domain)
 
 
+def clip(s, n):
+    return s if len(s) <= n else s[:n - 3] + "..."
+
+
 def row_buttons(entry, w):
     """[(x, label, key)] for the buttons right-justified on the selected row."""
     out, x = [], w
@@ -827,13 +832,6 @@ class LogView:
         scr = self.scr
         scr.erase()
         h, w = scr.getmaxyx()
-        cw = 20
-        head = f"{'Time':8} {'Client':{cw}} {'Type':5} {'Status':6} Domain"
-        tags = (f"  client: {self.client[1]}" if self.client else "") + \
-               (f"  filter: {self.typed}" if self.typed else "")
-        if tags:
-            head = head.ljust(max(len(head), w - len(tags))) + tags
-        addstr(scr, 0, 0, head.ljust(w), curses.A_REVERSE | curses.A_BOLD)
         # Details pane: DETAIL_ROWS lines, more when the wrapped entry needs them,
         # never leaving the list under 5 rows (dropped entirely if even DETAIL_ROWS won't fit).
         cur = self.current()
@@ -846,10 +844,19 @@ class LogView:
         body = self.body = max(1, h - 2 - dh)
         self.top = scroll(self.top, self.sel, body, len(self.rows), self.pad)
         self.pad = PAD
+        # Client column fits the longest name on screen; minimal while filtering by one client.
+        names = [client_name(e) for e in self.rows[self.top: self.top + body]]
+        cw = 6 if self.client else min(CLIENT_MAX, max([6] + [len(n) for n in names]))
+        head = f"{'Time':8} {'Client':{cw}} {'Type':5} {'Status':6} Domain"
+        tags = (f"  client: {self.client[1]}" if self.client else "") + \
+               (f"  filter: {self.typed}" if self.typed else "")
+        if tags:
+            head = head.ljust(max(len(head), w - len(tags))) + tags
+        addstr(scr, 0, 0, head.ljust(w), curses.A_REVERSE | curses.A_BOLD)
         for i, e in enumerate(self.rows[self.top: self.top + body]):
             q = e.get("question") or {}
             label, color = verdict(e)
-            line = (f"{e.get('time', '')[11:19]:8} {client_name(e)[:cw]:{cw}} "
+            line = (f"{e.get('time', '')[11:19]:8} {clip(client_name(e), cw):{cw}} "
                     f"{q.get('type', '')[:5]:5} {label:6} {q.get('name', '')}")
             attr = curses.color_pair(color)
             if self.top + i == self.sel:
