@@ -5,7 +5,7 @@ Keys are function keys: F2 custom rules manager, F3 filter by client, F4 ignore 
 F6 block/unblock, F7 ignored list, F8 auto-refresh interval, F9 log out, F10 or Ctrl+Q quit.
 Typing filters the list (domain, client name or IP); Esc clears it.
 The session cookie (never the password), the ignore list and the client
-filter are kept in ~/.config/adguard-manager, mode 600. That file is written
+filter are kept in ~/.config/adguard-manager.json, mode 600. That file is written
 at login, and on exit if the ignore list or client filter changed or you
 logged out.
 """
@@ -22,8 +22,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
-                    "adguard-manager")
+CONF_DIR = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+CONF = os.path.join(CONF_DIR, "adguard-manager.json")
+OLD_CONF = os.path.join(CONF_DIR, "adguard-manager")  # transition: remove after 2026-10-26
 DEFAULT_URL = "http://adguard.lan"
 COOKIE_NAME = "agh_session"
 TIMEOUT = 10
@@ -119,6 +120,8 @@ class Api:
 
 def load_conf():
     try:
+        if os.path.isfile(OLD_CONF) and not os.path.exists(CONF):
+            os.rename(OLD_CONF, CONF)  # transition: remove after 2026-10-26
         with open(CONF) as f:
             return json.load(f)
     except (OSError, ValueError):

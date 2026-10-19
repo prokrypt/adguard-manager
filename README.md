@@ -49,7 +49,7 @@ Mouse: click a row to select it, click its [BLK]/[UBLK] or [IGN] button to press
 
 ## How it works
 
-- **Login:** `POST /control/login`. Only the `agh_session` cookie is stored, never the password, in `~/.config/adguard-manager` (JSON, mode 600). When the session expires you are asked again.
+- **Login:** `POST /control/login`. Only the `agh_session` cookie is stored, never the password, in `~/.config/adguard-manager.json` (JSON, mode 600). When the session expires you are asked again.
 - **Few disk writes:** the config file is written at login, and on exit only if the ignore list or the client filter changed (or you logged out). Refreshing writes nothing.
 - **Little network traffic:** the first load fetches 20 entries (fills the screen), then pages of 100 up to 500 between keypresses. Refresh (F5, or automatic every 5s) asks for 20 entries and stops at the first one it already has; longer gaps take bigger pages. New entries are added on top.
 - **Block/unblock (F6):** edits the custom filtering rules. Unblock removes a matching `||name^` rule, and adds `@@||name^` if the name is still blocked; block works the other way. You choose the level (`ads.x.example.com`, `x.example.com` or `example.com`, each with its subdomains). The row then shows AdGuard's current verdict (`/control/filtering/check_host`) and the details keep the original one. F6 again on the same row undoes exactly what it did.
