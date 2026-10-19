@@ -47,7 +47,7 @@ Notes for making changes. User-facing docs are in README.md.
 
 ## Drawing
 
-- `LogView.draw`: header row, list (`body` rows), `─ Details ─` pane (`DETAIL_ROWS`, grows for wrapped text, dropped when the screen is too short), footer on the last line. The client column width fits the visible names, capped at `CLIENT_MAX`.
+- `LogView.draw`: header row, list (`body` rows), `─ Details ─` pane (`DETAIL_ROWS`, grows for wrapped text, dropped when the screen is too short), footer on the last line. The client column width fits the visible names, capped at `CLIENT_MAX`; it grows at once, but shrinks one cell per second and only while scrolling (`cw`, `cw_at`).
 - `addstr` drops the last cell of the bottom row (curses errors writing the bottom-right corner). Always draw through it, never `win.addstr` directly.
 - Colors: pair 1 red (BLOCK/errors), 2 green (ALLOW, `@@` rules), 3 cyan (REWR); default background.
 

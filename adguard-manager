@@ -680,6 +680,7 @@ class LogView:
         self.rows, self.top, self.sel, self.msg = [], 0, 0, ""
         # (ip, label) while filtering by client; remembered in conf, saved on exit
         self.client = tuple(conf["client"]) if conf.get("client") else None
+        self.cw, self.cw_at, self.cw_client = 6, 0, None  # client column width, see draw()
         self.typed = ""     # type-to-filter text: matches domain, client name or IP
         self.body = 1       # list rows on screen, set by draw()
         self.pad = PAD      # 0 for one draw after a click, so the clicked row stays put
@@ -854,11 +855,18 @@ class LogView:
         room = h - 2 - 1 - 5
         dh = min(max(DETAIL_ROWS, len(lines)), room) + 1 if room >= DETAIL_ROWS else 0
         body = self.body = max(1, h - 2 - dh)
-        self.top = scroll(self.top, self.sel, body, len(self.rows), self.pad)
+        top, self.top = self.top, scroll(self.top, self.sel, body, len(self.rows), self.pad)
         self.pad = PAD
         # Client column fits the longest name on screen; minimal while filtering by one client.
+        # It grows at once but shrinks only while scrolling, one cell per second, so it doesn't jump.
         names = [client_name(e) for e in self.rows[self.top: self.top + body]]
-        cw = 6 if self.client else min(CLIENT_MAX, max([6] + [len(n) for n in names]))
+        want = 6 if self.client else min(CLIENT_MAX, max([6] + [len(n) for n in names]))
+        now = time.monotonic()
+        if want >= self.cw or self.client != self.cw_client:
+            self.cw, self.cw_client = want, self.client
+        elif self.top != top and now - self.cw_at >= 1:
+            self.cw, self.cw_at = self.cw - 1, now
+        cw = self.cw
         head = f"{'Time':8} {'Client':{cw}} {'Type':5} {'Status':6} Domain"
         tags = (f"  client: {self.client[1]}" if self.client else "") + \
                (f"  filter: {self.typed}" if self.typed else "")
