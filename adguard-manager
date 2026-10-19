@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """adguard-manager: curses front end for the AdGuard Home query log.
 
-Keys are function keys: F2 custom rules manager, F3 filter by client, F4 ignore a domain
+Function keys do everything, so typing always filters; F1 shows this help in the app.
+F2 custom rules manager (F6 undoes a change there), F3 filter by client, F4 ignore a domain
 (on a greyed row: un-ignore; the ignored list is the last item of its menu), F5 refresh,
-F6 block/unblock (or block the answer IPs or CNAMEs, or remove the custom rule that blocked it), F7 show/hide ignored queries, F8 auto-refresh interval, F9 log out, F10 or Ctrl+Q quit.
+F6 block/unblock (or block the answer IPs or CNAMEs, or remove the custom rule that blocked it),
+F7 cycles: show ignored / blocked only / hide ignored, F8 auto-refresh interval, F9 log out,
+F10 or Ctrl+Q quit.
 Typing filters the list (domain, client name or IP); Esc clears it.
 On the selected row, clicking the client filters by it and clicking a domain label
 picks it and its parent domains for F4/F6. Keys: Right picks the domain (again: shorter),
@@ -11,24 +14,27 @@ Left a longer part or the client, Enter acts on the pick, or with no pick asks b
 The session cookie (never the password), the ignore list and the client
 filter are kept in ~/.config/adguard-manager.json, mode 600. That file is written
 at login, and on exit if the ignore list or client filter changed or you
-logged out.
+logged out. Several AdGuard servers can be kept as named profiles.
 """
 import concurrent.futures
 import curses
+import http.client
 import json
 import os
+import socket
 import sys
 import termios
 import textwrap
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
+from datetime import datetime
 
 CONF_DIR = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
 CONF = os.path.join(CONF_DIR, "adguard-manager.json")
 OLD_CONF = os.path.join(CONF_DIR, "adguard-manager")  # transition: remove after 2026-10-26
+DEBUG_LOG = os.path.join(CONF_DIR, "adguard-manager-debug.log")
+VERSION = "0.1.0"
 DEFAULT_URL = "http://adguard.lan"
 COOKIE_NAME = "agh_session"
 TIMEOUT = 10
@@ -47,36 +53,90 @@ class AuthError(Exception):
 
 
 class Api:
-    def __init__(self, url, cookie=None):
+    """Thin wrapper over AdGuard's /control/* API.
+
+    One persistent connection, reused across requests (the background fetch
+    thread shares it, guarded by a lock). request() maps 401/403 to AuthError
+    and everything else to RuntimeError.
+    """
+    def __init__(self, url, cookie=None, debug=False):
         self.url = url.rstrip("/")
         self.cookie = cookie
+        self.debug = debug
+        self._conn = None  # ((scheme, host, port), connection)
+        self._lock = threading.Lock()
+
+    def _open(self):
+        p = urllib.parse.urlparse(self.url)
+        key = (p.scheme, p.hostname, p.port)
+        if self._conn is None or self._conn[0] != key:
+            self.close()
+            cls = http.client.HTTPSConnection if p.scheme == "https" else http.client.HTTPConnection
+            port = p.port or (443 if p.scheme == "https" else 80)
+            self._conn = (key, cls(p.hostname, port, timeout=TIMEOUT))
+        return self._conn[1]
+
+    def close(self):
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            try:
+                conn[1].close()
+            except OSError:
+                pass
+
+    def _log(self, method, path, status, ms):
+        # method/path/status only: bodies can carry the password (login)
+        if not self.debug:
+            return
+        try:
+            with open(DEBUG_LOG, "a") as f:
+                f.write("%s %s %s -> %s (%.0fms)\n"
+                        % (time.strftime("%Y-%m-%d %H:%M:%S"), method, path, status, ms))
+        except OSError:
+            pass
 
     def request(self, path, data=None):
+        """Returns (set-cookies, parsed JSON body)."""
         body = None if data is None else json.dumps(data).encode()
-        req = urllib.request.Request(self.url + path, data=body)
+        headers = {}
         if body is not None:
-            req.add_header("Content-Type", "application/json")
+            headers["Content-Type"] = "application/json"
         if self.cookie:
-            req.add_header("Cookie", self.cookie)
-        try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-                raw = resp.read()
-                return resp, (json.loads(raw) if raw.strip().startswith((b"{", b"[")) else None)
-        except urllib.error.HTTPError as e:
-            if e.code in (401, 403):
-                raise AuthError(e.read().decode(errors="replace").strip() or e.reason)
-            if e.code == 429:  # AdGuard locks the IP out after failed logins
-                raise RuntimeError("Too many failed logins, "
-                                   + e.read().decode(errors="replace").strip().removeprefix("auth: "))
-            raise RuntimeError(f"HTTP {e.code}: {e.read().decode(errors='replace').strip() or e.reason}")
-        except urllib.error.URLError as e:
-            raise RuntimeError(f"{self.url}: {e.reason}")
-        except TimeoutError:
-            raise RuntimeError(f"{self.url}: timed out after {TIMEOUT}s")
+            headers["Cookie"] = self.cookie
+        method = "POST" if body is not None else "GET"
+        with self._lock:
+            # The server may have closed an idle connection: try once more on a fresh one.
+            # All our endpoints are safe to repeat (login makes an extra session at worst).
+            for attempt in (0, 1):
+                t0, conn = time.monotonic(), self._open()
+                try:
+                    conn.request(method, path, body=body, headers=headers)
+                    resp = conn.getresponse()
+                    raw = resp.read()
+                except (http.client.HTTPException, OSError) as e:
+                    self.close()
+                    if attempt == 0:
+                        continue
+                    raise RuntimeError(f"{self.url}: {e}")
+                except (socket.timeout, TimeoutError):
+                    self.close()
+                    raise RuntimeError(f"{self.url}: timed out after {TIMEOUT}s")
+                ms = (time.monotonic() - t0) * 1000
+                status, reason = resp.status, resp.reason
+                cookies = [v for k, v in resp.getheaders() if k.lower() == "set-cookie"]
+                self._log(method, path, status, ms)
+                if status in (401, 403):
+                    raise AuthError(raw.decode(errors="replace").strip() or reason)
+                if status == 429:  # AdGuard locks the IP out after failed logins
+                    raise RuntimeError("Too many failed logins, "
+                                       + raw.decode(errors="replace").strip().removeprefix("auth: "))
+                if status >= 400:
+                    raise RuntimeError(f"HTTP {status}: {raw.decode(errors='replace').strip() or reason}")
+                return cookies, (json.loads(raw) if raw.strip().startswith((b"{", b"[")) else None)
 
     def login(self, name, password):
-        resp, _ = self.request("/control/login", {"name": name, "password": password})
-        for header in resp.headers.get_all("Set-Cookie") or []:
+        cookies, _ = self.request("/control/login", {"name": name, "password": password})
+        for header in cookies:
             pair = header.split(";", 1)[0].strip()
             if pair.startswith(COOKIE_NAME + "="):
                 self.cookie = pair
@@ -126,6 +186,7 @@ def load_conf():
     try:
         if os.path.isfile(OLD_CONF) and not os.path.exists(CONF):
             os.rename(OLD_CONF, CONF)  # transition: remove after 2026-10-26
+            os.chmod(CONF, 0o600)  # the old file may have looser permissions
         with open(CONF) as f:
             return json.load(f)
     except (OSError, ValueError):
@@ -138,6 +199,45 @@ def save_conf(conf):
     os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(conf, f)
+
+
+def _is_local(host):
+    """Is this hostname plainly a local one (no cleartext-password warning needed)?"""
+    host = (host or "").lower().rstrip(".")
+    return (host in ("localhost", "::1") or host.startswith("127.")
+            or host.endswith((".lan", ".local", ".home", ".internal")))
+
+
+def migrate_profiles(conf):
+    """Configs from before profiles become a single "default" profile."""
+    if "profiles" in conf:
+        return
+    prof = {}
+    url, cookie = conf.pop("url", None), conf.pop("cookie", None)
+    if url:
+        prof["url"] = url
+    if cookie:
+        prof["cookie"] = cookie
+    conf["profiles"] = {"default": prof}
+    conf["profile"] = "default"
+
+
+def pick_profile(scr, conf):
+    """Choose the AdGuard server. Returns the profile name, or None to quit."""
+    while True:
+        names = list(conf["profiles"])
+        if len(names) == 1 and conf["profiles"][names[0]].get("url"):
+            return names[0]  # one configured server: no picker
+        items = ["%s  (%s)" % (n, conf["profiles"][n].get("url") or "not set up yet") for n in names]
+        i = choose(scr, "AdGuard server", items + ["New server…"], "Enter: choose  Esc/F10: quit")
+        if i is None:
+            return None
+        if i < len(names):
+            return names[i]
+        name = (ask(scr, "Name for the new server", "") or "").strip()
+        if name:
+            conf["profiles"].setdefault(name, {})
+            return name
 
 
 # ---------- curses helpers ----------
@@ -285,8 +385,16 @@ def login_form(scr, url, name="", error=""):
             if cur < len(fields) - 1:
                 cur += 1
             elif all(x.value for x in fields):
+                url = fields[0].value.strip()
+                if "://" not in url:
+                    url = "http://" + url
+                    fields[0].value = url
+                host = urllib.parse.urlparse(url).hostname or ""
+                if urllib.parse.urlparse(url).scheme == "http" and not _is_local(host):
+                    if not confirm(scr, "The password goes over plain HTTP to %s. Log in anyway?" % (host or url)):
+                        continue
                 curses.curs_set(0)
-                return fields[0].value.strip(), fields[1].value, fields[2].value
+                return url, fields[1].value, fields[2].value
             else:
                 error = "Fill in all three fields."
                 cur = next(i for i, x in enumerate(fields) if not x.value)
@@ -294,37 +402,49 @@ def login_form(scr, url, name="", error=""):
             f.key(k)
 
 
-def authenticate(scr, conf):
-    """Make sure we hold a working session; returns an Api or None (quit)."""
-    api = Api(conf.get("url", DEFAULT_URL), conf.get("cookie"))
-    name = error = ""
-    try:
-        api.status()
-        return api
-    except AuthError:
-        if api.cookie:
-            error = "Saved session expired, please log in again."
-    except RuntimeError as e:
-        error = str(e)
+def authenticate(scr, conf, debug):
+    """Pick a server profile and make sure we hold a working session.
+
+    Returns (api, profile name), or (None, None) if the user quit."""
+    migrate_profiles(conf)
     while True:
-        got = login_form(scr, api.url, name, error)
-        if got is None:
-            return None
-        url, name, password = got
-        api = Api(url)
-        message(scr, f"Logging in to {api.url}…")
+        name = pick_profile(scr, conf)
+        if name is None:
+            return None, None
+        prof = conf["profiles"][name]
+        api = Api(prof.get("url") or DEFAULT_URL, prof.get("cookie"), debug)
+        user = error = ""
         try:
-            api.login(name, password)
             api.status()
-        except AuthError as e:
-            error = f"Login failed: {e}"
-            continue
+            conf["profile"] = name
+            return api, name
+        except AuthError:
+            if api.cookie:
+                error = "Saved session expired, please log in again."
         except RuntimeError as e:
             error = str(e)
-            continue
-        conf.update(url=api.url, cookie=api.cookie)
-        save_conf(conf)
-        return api
+        while True:
+            got = login_form(scr, api.url, user, error)
+            if got is None:
+                break  # back to the server picker (Esc quits there, or here with one server)
+            url, user, password = got
+            api = Api(url, debug=debug)
+            message(scr, f"Logging in to {api.url}…")
+            try:
+                api.login(user, password)
+                api.status()
+            except AuthError as e:
+                error = f"Login failed: {e}"
+                continue
+            except RuntimeError as e:
+                error = str(e)
+                continue
+            prof.update(url=api.url, cookie=api.cookie)
+            conf["profile"] = name
+            save_conf(conf)
+            return api, name
+        if len(conf["profiles"]) == 1:
+            return None, None
 
 
 def message(scr, text):
@@ -448,12 +568,106 @@ def confirm(scr, question):
     return choose(scr, question, ["No", "Yes"], "Enter: choose  Esc/F10: cancel") == 1
 
 
+HELP_LOG = [
+    ("F1", "this help"),
+    ("F2", "custom filtering rules"),
+    ("F3", "show one client / all clients"),
+    ("F4", "ignore a domain (greyed row: un-ignore)"),
+    ("F5", "refresh"),
+    ("F6", "block / unblock (answer IPs, CNAMEs); again: undo"),
+    ("F7", "show ignored / blocked only / hide ignored"),
+    ("F8", "auto-refresh interval"),
+    ("F9", "log out"),
+    ("F10 / Ctrl+Q", "quit"),
+    ("typing", "filter the list (domain, client, IP)"),
+    ("Esc", "clear the filter"),
+    ("Up Down PgUp PgDn", "move"),
+    ("Left Right", "pick longer / shorter domain part (or the client)"),
+    ("Enter", "act on the pick"),
+    ("mouse", "click rows, buttons, clients, domains, footer keys"),
+]
+
+HELP_RULES = [
+    ("F1", "this help"),
+    ("F2 / F10", "back (asks to submit changes)"),
+    ("F4", "edit rule"),
+    ("F6 / Ctrl+Z", "undo last change"),
+    ("F7", "add rule"),
+    ("F8 / Delete", "delete rule"),
+    ("Enter", "edit / delete menu"),
+    ("Esc", "clear the filter, or back"),
+    ("typing", "filter the rules"),
+]
+
+
+def show_help(scr, title, items):
+    """A centered key list; any key (or click) closes it."""
+    rows = [f"{key:<14} {desc}" for key, desc in items]
+    while True:
+        h, w = scr.getmaxyx()
+        bw = min(w - 2, max(len(title) + 4, *(len(r) for r in rows)) + 4)
+        bh = min(h - 2, len(rows) + 4)
+        win = curses.newwin(bh, bw, (h - bh) // 2, (w - bw) // 2)
+        win.keypad(True)
+        win.box()
+        addstr(win, 0, 2, f" {title} "[: bw - 3], curses.A_BOLD)
+        for i, r in enumerate(rows[: bh - 4]):
+            addstr(win, 2 + i, 2, r[: bw - 4])
+        addstr(win, bh - 1, 2, " any key: back "[: bw - 3], curses.A_DIM)
+        win.refresh()
+        k = win.get_wch()
+        if k == curses.KEY_RESIZE:
+            continue
+        if k == curses.KEY_MOUSE:
+            mouse(scr)  # consume; any click closes
+        break
+    scr.touchwin()
+    scr.refresh()
+
+
+def valid_rule(rule):
+    """Light sanity check for a filtering rule; "" when it looks fine."""
+    if not rule:
+        return "empty rule"
+    if any(c.isspace() for c in rule):
+        return "no spaces allowed in a rule"
+    return ""
+
+
+def _blocks(rule_text):
+    """Does this custom rule block, as opposed to allowing or being a comment?"""
+    return bool(rule_text) and not rule_text.startswith(("@@", "#", "!"))
+
+
+def local_time(iso):
+    """HH:MM:SS in the local timezone; the raw slice when it can't be parsed."""
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return iso[11:19]
+    if dt.tzinfo is None:
+        return iso[11:19]  # naive: don't guess, show as-is
+    return dt.astimezone().strftime("%H:%M:%S")
+
+
+def local_datetime(iso):
+    """Full timestamp in the local timezone; the raw text when it can't be parsed."""
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return iso.replace("T", " ")
+    if dt.tzinfo is None:
+        return iso.replace("T", " ")
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
 # ---------- custom rules view ----------
 
 class RulesView:
     """AdGuard's custom filtering rules in stored order (new rules are appended, so oldest first)."""
 
-    KEYS = [("F2", "Back"), ("F4", "Edit"), ("F5", "Reload"), ("F7", "Add"), ("F8", "Delete"), ("F10", "Back")]
+    KEYS = [("F1", "Help"), ("F2", "Back"), ("F4", "Edit"), ("F5", "Reload"), ("F6", "Undo"),
+            ("F7", "Add"), ("F8", "Delete"), ("F10", "Back")]
 
     def __init__(self, scr, api):
         self.scr, self.api = scr, api
@@ -510,7 +724,7 @@ class RulesView:
         meanwhile (web interface), the edits are replayed on that list by rule text."""
         fresh = self.api.user_rules()
         if fresh != self.saved:
-            for kind, old, new in self.ops:
+            for kind, old, new, _at in self.ops:
                 if kind == "add":
                     if new not in fresh:
                         fresh.append(new)
@@ -524,7 +738,7 @@ class RulesView:
         return f"Rules saved ({len(self.ops)} changes)"
 
     def changed(self, kind, old, new, msg, at=None):
-        self.ops.append((kind, old, new))
+        self.ops.append((kind, old, new, at))
         self.apply(keep=at, jump_end=at is None)
         self.msg = msg + "; " + self.msg
 
@@ -533,13 +747,18 @@ class RulesView:
         if not cur:
             return
         new = ask(self.scr, f"Edit rule {cur[0] + 1}", cur[1])
-        if new is None or new == cur[1]:
+        while new is not None and new.strip() and new.strip() != cur[1] and valid_rule(new.strip()):
+            new = ask(self.scr, f"Edit rule {cur[0] + 1} ({valid_rule(new.strip())})", new)
+        if new is None or not new.strip() or new.strip() == cur[1]:
             return
+        new = new.strip()
         self.rules[cur[0]] = new
         self.changed("edit", cur[1], new, f"Rule {cur[0] + 1} changed", cur[0])
 
     def add(self):
         new = ask(self.scr, "Add rule (goes at the end)")
+        while new is not None and new.strip() and valid_rule(new.strip()):
+            new = ask(self.scr, f"Add rule ({valid_rule(new.strip())})", new)
         if not new or not new.strip():
             return
         new = new.strip()
@@ -549,7 +768,34 @@ class RulesView:
         if self.typed and self.typed.lower() not in new.lower():
             self.typed = ""  # make sure the new rule is visible
         self.rules.append(new)
-        self.changed("add", None, new, f"Added {new}")
+        self.changed("add", None, new, f"Added {new}", len(self.rules) - 1)
+
+    def undo(self):
+        """Undo the last local change."""
+        if not self.ops:
+            self.msg = "Nothing to undo"
+            return
+        kind, old, new, at = self.ops.pop()
+        if kind == "add":
+            if at is not None and 0 <= at < len(self.rules) and self.rules[at] == new:
+                del self.rules[at]
+            else:
+                try:
+                    self.rules.remove(new)
+                except ValueError:
+                    pass
+            what = f"removed {new}"
+        elif kind == "delete":
+            self.rules.insert(min(at, len(self.rules)) if at is not None else len(self.rules), old)
+            what = f"restored {old}"
+        else:  # edit
+            if at is not None and 0 <= at < len(self.rules) and self.rules[at] == new:
+                self.rules[at] = old
+            elif new in self.rules:
+                self.rules[self.rules.index(new)] = old
+            what = f"restored {old}"
+        self.apply(keep=at)
+        self.msg = f"Undone: {what}; " + self.msg
 
     def delete(self):
         cur = self.current()
@@ -587,7 +833,9 @@ class RulesView:
             self.load()
         except RuntimeError as e:
             self.msg = str(e)
-        actions = {curses.KEY_F4: self.edit, curses.KEY_F5: self.reload, curses.KEY_F7: self.add,
+        actions = {curses.KEY_F1: lambda: show_help(self.scr, "Custom rules keys", HELP_RULES),
+                   curses.KEY_F4: self.edit, curses.KEY_F5: self.reload, curses.KEY_F6: self.undo,
+                   "\x1a": self.undo, curses.KEY_F7: self.add,
                    curses.KEY_F8: self.delete, curses.KEY_DC: self.delete,
                    "\n": self.menu, "\r": self.menu, curses.KEY_ENTER: self.menu}
         while True:
@@ -723,8 +971,8 @@ def fetch_new(api, search, known):
 
 
 class LogView:
-    def __init__(self, scr, api, conf):
-        self.scr, self.api, self.conf = scr, api, conf
+    def __init__(self, scr, api, conf, profile="default"):
+        self.scr, self.api, self.conf, self.profile = scr, api, conf, profile
         self.rows, self.top, self.sel, self.msg = [], 0, 0, ""
         # (ip, label) while filtering by client; remembered in conf, saved on exit
         self.client = tuple(conf["client"]) if conf.get("client") else None
@@ -732,12 +980,13 @@ class LogView:
         self.part = None    # (entry, domain) after a click on the selected row's domain (or Right); F4/F6 use it
         self.on_client = None  # entry whose client is picked (click or Left); Enter filters by it
         self.typed = ""     # type-to-filter text: matches domain, client name or IP
-        self.show_ign = False  # F7: show ignored queries greyed out instead of hiding them
+        self.view = 0       # F7 cycles: 0 hide ignored, 1 show ignored greyed out, 2 blocked only
         self.body = 1       # list rows on screen, set by draw()
         self.pad = PAD      # 0 for one draw after a click, so the clicked row stays put
         self.job = None     # (kind, search, list it extends, Future) while a background fetch runs
         self.lists = {}     # filter list id -> name, for the details pane
         self.more = {}      # search string -> older_than cursor while the first load continues
+        self.more_backoff = {}  # search string -> (failures, next retry time) after a failed page
         self.auto = AUTO[0]
         self.last = 0.0     # time of the last refresh
         self.cache = {}     # search string -> entries, so switching views only fetches the gap
@@ -776,9 +1025,9 @@ class LogView:
     def keys(self):
         cur = self.current()
         block = "Unblock" if cur and verdict(cur)[0] == "BLOCK" else "Block"
-        return [("F2", "Rules"), ("F3", "All clients" if self.client else "Client"),
+        return [("F1", "Help"), ("F2", "Rules"), ("F3", "All clients" if self.client else "Client"),
                 ("F4", "Ignore"),
-                ("F5", "Refresh"), ("F6", block), ("F7", "Hide ign" if self.show_ign else "Show ign"),
+                ("F5", "Refresh"), ("F6", block), ("F7", ("Show ign", "Blocked", "All")[self.view]),
                 ("F8", f"Auto {self.auto}s" if self.auto else "Auto off"), ("F9", "Logout"), ("F10", "Quit")]
 
     def current(self):
@@ -798,8 +1047,10 @@ class LogView:
                 continue
             if self.ignored(e, ign):
                 hidden += 1
-                if not self.show_ign:
+                if self.view != 1:
                     continue
+            if self.view == 2 and verdict(e)[0] != "BLOCK":
+                continue
             if t and not (t in qname(e) or t in client_name(e).lower() or t in e.get("client", "")):
                 continue
             if e is keep:
@@ -847,6 +1098,7 @@ class LogView:
         """First page only: enough to fill the screen. got_more() adds the rest."""
         self.cache[self.search] = page
         self.more[self.search] = older if len(page) == FIRST_PAGES[0] and older else None
+        self.more_backoff.pop(self.search, None)
         self.apply()
 
     def got_more(self, page, older):
@@ -865,7 +1117,8 @@ class LogView:
         if self.job:
             return 50  # poll for the background fetch
         if self.more.get(self.search):
-            return 0
+            retry = self.more_backoff.get(self.search, (0, 0.0))[1]
+            return max(0, int((retry - time.monotonic()) * 1000)) if retry else 50
         if not self.auto:
             return -1
         return max(0, int((self.last + self.auto - time.monotonic()) * 1000))
@@ -876,6 +1129,8 @@ class LogView:
         if not self.job:
             search = self.search
             if self.more.get(search):
+                if time.monotonic() < self.more_backoff.get(search, (0, 0.0))[1]:
+                    return  # backing off after a failed page; wait_ms() wakes us in time
                 kind, fn, args = "more", self.api.querylog, (FIRST_PAGES[-1], search, self.more[search])
             else:
                 self.last = time.monotonic()
@@ -893,11 +1148,15 @@ class LogView:
             got = fut.result()
         except RuntimeError as e:
             if kind == "more":
-                self.more[search] = None
+                # Keep the cursor and retry the page after a backoff, instead of
+                # giving up the first load on one failed page.
+                fails, _ = self.more_backoff.get(search, (0, 0.0))
+                self.more_backoff[search] = (fails + 1, time.monotonic() + min(60, 5 * (fails + 1)))
             self.msg = str(e)
             self.last = time.monotonic()  # retry after a full interval, not in a tight loop
             return
         if kind == "more":
+            self.more_backoff.pop(search, None)
             self.got_more(*got)
         elif kind == "first":
             self.got_first(*got)
@@ -940,7 +1199,8 @@ class LogView:
             self.cw, self.cw_at = self.cw - 1, now
         cw = self.cw
         head = f"{'Time':8} {'Client':{cw}} {'Type':5} {'Status':6} Domain"
-        tags = (f"  client: {self.client[1]}" if self.client else "") + \
+        tags = (f"  server: {self.profile}" if len(self.conf.get("profiles", {})) > 1 else "") + \
+               (f"  client: {self.client[1]}" if self.client else "") + \
                (f"  filter: {self.typed}" if self.typed else "")
         if tags:
             head = head.ljust(max(len(head), w - len(tags))) + tags
@@ -951,7 +1211,7 @@ class LogView:
             name = q.get('name', '')
             if self.top + i == self.sel:
                 name = clip(name, name_room(e, w, cw))  # keep the domain out from under the buttons
-            line = (f"{e.get('time', '')[11:19]:8} {clip(client_name(e), cw):{cw}} "
+            line = (f"{local_time(e.get('time', '')):8} {clip(client_name(e), cw):{cw}} "
                     f"{q.get('type', '')[:5]:5} {label:6} {name}")
             attr = curses.color_pair(4) | curses.A_DIM if self.ignored(e) else curses.color_pair(color)
             if self.top + i == self.sel:
@@ -984,7 +1244,7 @@ class LogView:
             client = f"{info['name']} ({client})"
         if e.get("client_proto"):
             client += f" via {e['client_proto'].upper()}"
-        out = [("Time", e.get("time", "").replace("T", " "), 0),
+        out = [("Time", local_datetime(e.get("time", "")), 0),
                ("Client", client, 0),
                ("Query", f"{q.get('name', '')}  {q.get('type', '')} {q.get('class', '')}", curses.A_BOLD),
                ("Result", e.get("reason", "") + (f"  ({e['service_name']})" if e.get("service_name") else "")
@@ -1069,6 +1329,7 @@ class LogView:
             self.cache[ip] = [e for e in full if e.get("client") == ip]
             if self.cache[ip] and len(self.cache[ip]) < LOG_LIMIT:
                 self.more[ip] = full[-1].get("time")
+                self.more_backoff.pop(ip, None)
         self.refresh()
 
     def ignore_current(self):
@@ -1100,9 +1361,13 @@ class LogView:
             return self.edit_ignored()
         return None if i is None else opts[i]
 
-    def toggle_ignored(self):
-        self.show_ign = not self.show_ign
+    def cycle_view(self):
+        """F7: hide ignored -> show ignored greyed out -> blocked only -> hide ignored."""
+        self.view = (self.view + 1) % 3
         self.apply(self.current(), jump=True)
+        self.msg = (("Showing ignored queries greyed out; " if self.view == 1 else
+                     "Showing blocked queries only; " if self.view == 2 else
+                     "Hiding ignored queries; ") + self.msg)
 
     def edit_ignored(self):
         while self.ignore:
@@ -1154,24 +1419,28 @@ class LogView:
             return self.f6_done(cur, name, ops)
         d = opts[i - len(mine)]
         block, allow = f"||{d}^", f"@@||{d}^"
-        # First drop our own opposite rule; only if AdGuard still disagrees, add a new one.
         drop, add = (block, allow) if unblock else (allow, block)
-        need_add = True
         if drop in (r.strip() for r in rules):
-            i = next(i for i, r in enumerate(rules) if r.strip() == drop)
-            ops.append(("del", rules.pop(i), i))
-            self.api.set_user_rules(rules)
-            # AdGuard's check is by name only, so a row blocked by some other rule
-            # (e.g. an answer-IP rule) still needs the allow rule even if the check says fine.
-            others = [r.get("text") for r in cur.get("rules") or [] if r.get("text") != drop]
-            need_add = (verdict(self.api.check_host(name))[0] == "BLOCK") == unblock or (unblock and others)
+            # Decide before writing, then write once. check_host answers for the name
+            # only, so the query-time rules are consulted too: a row blocked by some
+            # other rule (e.g. an answer-IP rule) still needs the allow rule even if
+            # the check says fine.
+            matched = [r.get("text", "") for r in self.api.check_host(name).get("rules") or []]
+            others = [t for t in dict.fromkeys(r.get("text", "") for r in cur.get("rules") or [])
+                      if t != drop]
+            still_blocked = any(t != drop and _blocks(t) for t in matched)
+            need_add = (still_blocked == unblock) or (unblock and others)
+            j = next(j for j, r in enumerate(rules) if r.strip() == drop)
+            ops.append(("del", rules.pop(j), j))
+        else:
+            need_add = True  # without our opposite rule there, just add
         if need_add and add not in (r.strip() for r in rules):
             rules.append(add)
             ops.append(("add", add, len(rules) - 1))
-            self.api.set_user_rules(rules)
         if not ops:
             self.msg = f"No change: {add} is already there"
             return
+        self.api.set_user_rules(rules)  # one write for the whole F6 action
         self.f6_done(cur, name, ops)
 
     def f6_done(self, cur, name, ops):
@@ -1237,9 +1506,10 @@ class LogView:
             self.refresh()
         except RuntimeError as e:
             self.msg = str(e)
-        actions = {curses.KEY_F2: self.rules_view, curses.KEY_F3: self.pick_client, curses.KEY_F4: self.ignore_current,
+        actions = {curses.KEY_F1: lambda: show_help(self.scr, "Query log keys", HELP_LOG),
+                   curses.KEY_F2: self.rules_view, curses.KEY_F3: self.pick_client, curses.KEY_F4: self.ignore_current,
                    curses.KEY_F5: self.refresh, curses.KEY_F6: self.toggle_block,
-                   curses.KEY_F7: self.toggle_ignored, curses.KEY_F8: self.cycle_auto}
+                   curses.KEY_F7: self.cycle_view, curses.KEY_F8: self.cycle_auto}
         while True:
             self.draw()
             self.scr.timeout(self.wait_ms())
@@ -1298,7 +1568,32 @@ class LogView:
                 self.sel = last
 
 
-def main(scr):
+def _drop_cookie(conf):
+    prof = conf.get("profiles", {}).get(conf.get("profile") or "default", {})
+    prof.pop("cookie", None)
+
+
+def parse_args(argv):
+    """--help/--version/--debug; returns the debug flag."""
+    debug = False
+    for a in argv[1:]:
+        if a in ("-h", "--help"):
+            print("Usage: adguard-manager [--debug] [--version] [--help]")
+            print()
+            print(__doc__.strip())
+            sys.exit(0)
+        elif a == "--version":
+            print("adguard-manager", VERSION)
+            sys.exit(0)
+        elif a == "--debug":
+            debug = True
+        else:
+            print(f"adguard-manager: unknown argument {a!r}", file=sys.stderr)
+            sys.exit(2)
+    return debug
+
+
+def main(scr, debug):
     curses.set_escdelay(25)  # Esc closes popups without the default 1s wait
     curses.use_default_colors()
     curses.init_pair(1, curses.COLOR_RED, -1)
@@ -1307,26 +1602,33 @@ def main(scr):
     curses.init_pair(4, 8 if curses.COLORS >= 16 else -1, -1)  # grey (bright black) where available
     curses.curs_set(0)
     curses.mousemask(curses.ALL_MOUSE_EVENTS)  # Shift+drag still selects text in most terminals
-    # Turn off XON/XOFF so Ctrl+Q reaches us; curses.wrapper restores the tty on exit.
-    attrs = termios.tcgetattr(sys.stdin)
-    attrs[0] &= ~termios.IXON
-    termios.tcsetattr(sys.stdin, termios.TCSANOW, attrs)
+    # Turn off XON/XOFF so Ctrl+Q reaches us, and the suspend key so Ctrl+Z reaches us
+    # (undo in the rules view) instead of suspending the app. Not a tty (piped stdin): skip.
+    # The interactive shell restores the tty settings when we exit.
+    try:
+        attrs = termios.tcgetattr(sys.stdin)
+        attrs[0] &= ~termios.IXON
+        attrs[6][termios.VSUSP] = 0
+        termios.tcsetattr(sys.stdin, termios.TCSANOW, attrs)
+    except termios.error:
+        pass
     curses.def_prog_mode()
     conf = load_conf()
     try:
         while True:
-            api = authenticate(scr, conf)
+            api, profile = authenticate(scr, conf, debug)
             if api is None:
                 return
             try:
-                action = LogView(scr, api, conf).run()
+                action = LogView(scr, api, conf, profile).run()
             except AuthError:
-                conf.pop("cookie", None)
+                _drop_cookie(conf)
                 continue
             if action == "quit":
                 return
             api.logout()
-            conf.pop("cookie", None)
+            api.close()
+            _drop_cookie(conf)
     finally:
         # Ignore-list and client-filter changes are kept in memory and written once, here.
         # (A login writes the file itself, so it is compared after that too.)
@@ -1337,7 +1639,8 @@ def main(scr):
 
 
 if __name__ == "__main__":
+    debug = parse_args(sys.argv)
     try:
-        curses.wrapper(main)
+        curses.wrapper(lambda scr: main(scr, debug))
     except KeyboardInterrupt:
         sys.exit(130)
