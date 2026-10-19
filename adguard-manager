@@ -141,20 +141,55 @@ def addstr(win, y, x, text, attr=0):
         pass
 
 
+def footer_layout(keys, w):
+    """[(x, key, label)] as the footer draws them, and the x after the last one."""
+    if sum(len(k) + len(l) + 1 for k, l in keys) > w - 16:  # keep room for the message
+        keys = [(k, l[:4]) for k, l in keys]
+    out, x = [], 0
+    for key, label in keys:
+        out.append((x, key, label))
+        x += len(key) + len(label) + 1
+    return out, x
+
+
 def footer(win, keys, msg=""):
     h, w = win.getmaxyx()
     win.move(h - 1, 0)
     win.clrtoeol()
-    x = 0
-    if sum(len(k) + len(l) + 1 for k, l in keys) > w - 16:  # keep room for the message
-        keys = [(k, l[:4]) for k, l in keys]
-    for key, label in keys:
-        addstr(win, h - 1, x, key, curses.A_BOLD)
-        x += len(key)
-        addstr(win, h - 1, x, label, curses.A_REVERSE)
-        x += len(label) + 1
+    spans, x = footer_layout(keys, w)
+    for kx, key, label in spans:
+        addstr(win, h - 1, kx, key, curses.A_BOLD)
+        addstr(win, h - 1, kx + len(key), label, curses.A_REVERSE)
     if msg:
         addstr(win, h - 1, max(x + 1, w - len(msg) - 1), msg)
+
+
+WHEEL_DOWN = getattr(curses, "BUTTON5_PRESSED", 0x200000)  # Python < 3.10 lacks the name
+
+
+def mouse(scr, keys=()):
+    """Read a KEY_MOUSE event; returns (key, y, x) in screen coordinates.
+
+    Wheel gives KEY_UP/KEY_DOWN, a click on a footer key gives that F key, a double
+    click gives "\n" (choose) and a single click None, both with the clicked y, x.
+    y is -1 when there is no position to act on."""
+    try:
+        _, x, y, _, b = curses.getmouse()
+    except curses.error:
+        return None, -1, -1
+    if b & curses.BUTTON4_PRESSED:
+        return curses.KEY_UP, -1, -1
+    if b & WHEEL_DOWN:
+        return curses.KEY_DOWN, -1, -1
+    if not b & (curses.BUTTON1_CLICKED | curses.BUTTON1_DOUBLE_CLICKED):
+        return None, -1, -1
+    h, w = scr.getmaxyx()
+    if keys and y == h - 1:
+        for kx, key, label in footer_layout(keys, w)[0]:
+            if kx <= x < kx + len(key) + len(label):
+                return curses.KEY_F0 + int(key[1:]), -1, -1
+        return None, -1, -1
+    return ("\n" if b & curses.BUTTON1_DOUBLE_CLICKED else None), y, x
 
 
 class Field:
@@ -298,6 +333,14 @@ def _choose(scr, title, items, hint):
             addstr(win, 2 + row, 2, items[i][: bw - 4].ljust(bw - 4), attr)
         win.refresh()
         k = win.get_wch()
+        if k == curses.KEY_MOUSE:
+            by, bx = win.getbegyx()
+            k, y, x = mouse(scr)
+            row = y - by - 2
+            if 0 <= row < body and top + row < len(shown) and bx < x < bx + bw - 1:
+                sel = top + row
+            elif k == "\n":
+                k = None  # double click outside the list
         last = max(0, len(shown) - 1)
         if k == "\x1b" and typed:
             typed = ""
@@ -489,6 +532,10 @@ class RulesView:
         while True:
             self.draw()
             k = self.scr.get_wch()
+            if k == curses.KEY_MOUSE:
+                k, y, _ = mouse(self.scr, self.KEYS)
+                if 0 <= y - 1 < self.body and self.top + y - 1 < len(self.rows):
+                    self.sel = self.top + y - 1
             last = max(0, len(self.rows) - 1)
             if k in (curses.KEY_F10, curses.KEY_F2):
                 return
@@ -937,6 +984,10 @@ class LogView:
             except curses.error:  # no key before the timeout
                 self.idle()
                 continue
+            if k == curses.KEY_MOUSE:
+                k, y, _ = mouse(self.scr, self.keys())
+                if 0 <= y - 1 < self.body and self.top + y - 1 < len(self.rows):
+                    self.sel = self.top + y - 1
             page = self.body
             last = max(0, len(self.rows) - 1)
             if k == curses.KEY_F10:
@@ -971,6 +1022,7 @@ def main(scr):
     curses.init_pair(2, curses.COLOR_GREEN, -1)
     curses.init_pair(3, curses.COLOR_CYAN, -1)
     curses.curs_set(0)
+    curses.mousemask(curses.ALL_MOUSE_EVENTS)  # Shift+drag still selects text in most terminals
     conf = load_conf()
     try:
         while True:
