@@ -32,6 +32,7 @@ Notes for making changes. User-facing docs are in README.md.
 - Errors: actions raise `RuntimeError` and the loop shows it in `self.msg`. `AuthError` is not caught in views; it goes up to `main`, which drops the cookie and shows the login form again.
 - Status text goes in `self.msg` (right side of the footer). Messages are prepended like `"Ignoring x; " + self.msg` after `apply()` rewrites it.
 - After a popup closes, `choose`/`ask` call `scr.touchwin()`, so the caller just redraws.
+- Mouse: `main()` sets `mouseinterval(0)`, so ncurses reports raw press/release; `mouse()` treats BUTTON1_PRESSED as the click and times double clicks itself (`DOUBLE_CLICK`). Don't go back to BUTTON1_CLICKED: touchpad taps with libinput tap-and-drag hold the release back past ncurses' 166ms click window, so taps never became clicks.
 - Mouse: a row click sets `self.pad = 0` for one draw so the clicked row doesn't move. Buttons (`row_buttons`) show only on the selected row and map to F4/F6. On the selected row a client click calls `set_client`, a domain click sets `self.part = (entry, suffix_at(...))`, which F4/F6 use instead of their menu; a second click on that part offers F6/F4 in a `choose` popup; any other click on the row clears it, and `draw()` drops it once the selection moves. `self.on_client` is the same for a picked client. Left/Right/Enter go through `row_key()`, which returns an F key to run (clicks reuse it by turning into `"\n"`).
 
 ## LogView data flow (the tricky part)
