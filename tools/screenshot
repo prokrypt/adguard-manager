@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""Screenshot adguard-manager against a fake AdGuard Home, for PRs.
+
+    tools/screenshot out.png [KEY ...]
+
+Runs the app in a pty (COLSxROWS, default 120x34) against a built-in fake server
+with sample data, sends the keys, then renders the terminal to PNG and prints it as text.
+KEY is F1..F12, Up, Down, PgUp, PgDn, Home, End, Enter, Esc, Tab, Bksp,
+wait:SECONDS, or any other text (typed as is, e.g. into the filter).
+Options: --app PATH (another copy, e.g. `git show main:adguard-manager > /tmp/old`
+for a before shot), --size COLSxROWS.
+Needs pyte and Pillow (`python3 -m pip install pyte pillow`); the app itself stays stdlib only.
+"""
+import argparse
+import curses
+import fcntl
+import http.server
+import json
+import os
+import pty
+import select
+import signal
+import struct
+import sys
+import tempfile
+import termios
+import threading
+import time
+import urllib.parse
+
+import pyte
+from PIL import Image, ImageDraw, ImageFont
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TERM = "xterm-256color"
+TI = {"Up": "kcuu1", "Down": "kcud1", "Right": "kcuf1", "Left": "kcub1", "PgUp": "kpp", "PgDn": "knp",
+      "Home": "khome", "End": "kend", **{f"F{n}": f"kf{n}" for n in range(1, 13)}}
+OTHER = {"Enter": "\r", "Esc": "\x1b", "Tab": "\t", "Bksp": "\x7f"}
+COLORS = {"default": None, "black": "#000000", "red": "#e05555", "green": "#55c060",
+          "brown": "#d0b040", "yellow": "#d0b040", "blue": "#5080e0", "magenta": "#c060c0",
+          "cyan": "#40c0c8", "white": "#e0e0e0"}
+FG, BG = "#d8d8d8", "#1c1c1c"
+FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+
+# ---------- fake AdGuard Home ----------
+
+CLIENTS = [("192.168.1.20", "laptop"), ("192.168.1.31", "living-room-tv"),
+           ("192.168.1.45", "phone"), ("192.168.1.50", "")]
+SAMPLE = [  # name, reason, rule, client index
+    ("www.google.com", "NotFilteredNotFound", None, 0),
+    ("ads.doubleclick.net", "FilteredBlackList", "||doubleclick.net^", 1),
+    ("github.com", "NotFilteredNotFound", None, 0),
+    ("telemetry.tv-vendor.example", "FilteredBlackList", "||telemetry.tv-vendor.example^", 1),
+    ("api.weather.example", "NotFilteredNotFound", None, 2),
+    ("nas.lan", "Rewrite", None, 0),
+    ("graph.facebook.com", "FilteredBlackList", "||facebook.com^", 2),
+    ("cdn.jsdelivr.net", "NotFilteredWhiteList", "@@||cdn.jsdelivr.net^", 0),
+    ("time.apple.com", "NotFilteredNotFound", None, 2),
+    ("app-measurement.com", "FilteredBlackList", "||app-measurement.com^", 2),
+    ("pypi.org", "NotFilteredNotFound", None, 3),
+    ("netflix.com", "NotFilteredNotFound", None, 1),
+    ("tracking.example.net", "FilteredBlackList", "||tracking.example.net^", 3),
+    ("news.ycombinator.com", "NotFilteredNotFound", None, 0),
+]
+
+
+def sample_log(n=60):
+    out, now = [], time.time()
+    for i in range(n):
+        name, reason, rule, c = SAMPLE[i % len(SAMPLE)]
+        ip, cname = CLIENTS[c]
+        t = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now - 7 * i)) + ".000000+00:00"
+        blocked = reason.startswith("Filtered")
+        e = {"time": t, "client": ip, "client_proto": "", "client_info": {"name": cname},
+             "question": {"name": name, "type": "A", "class": "IN"}, "reason": reason,
+             "status": "NOERROR", "elapsedMs": "%.1f" % (3 + i % 7 * 4.3), "cached": i % 3 == 0,
+             "upstream": "" if blocked or i % 3 == 0 else "https://dns.quad9.net/dns-query",
+             "answer": [{"type": "A", "value": "0.0.0.0" if blocked else "93.184.216.%d" % (i % 250), "ttl": 300}],
+             "rules": [{"text": rule, "filter_list_id": 0 if rule.startswith("@@") else 1}] if rule else []}
+        if reason == "Rewrite":
+            e["answer"] = [{"type": "A", "value": "192.168.1.2", "ttl": 10}]
+        out.append(e)
+    return out
+
+
+class Fake(http.server.BaseHTTPRequestHandler):
+    log = sample_log()
+    rules = ["@@||cdn.jsdelivr.net^", "||doubleclick.net^", "# local", "||telemetry.tv-vendor.example^"]
+
+    def log_message(self, *a):
+        pass
+
+    def send(self, obj, code=200, headers=()):
+        raw = json.dumps(obj).encode()
+        self.send_response(code)
+        for h in headers:
+            self.send_header(*h)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):
+        u = urllib.parse.urlparse(self.path)
+        q = dict(urllib.parse.parse_qsl(u.query))
+        if u.path == "/control/querylog":
+            rows = [e for e in self.log if q.get("search", "") in e["client"] + e["question"]["name"]]
+            if q.get("older_than"):
+                rows = [e for e in rows if e["time"] < q["older_than"]]
+            rows = rows[:int(q.get("limit", 500))]
+            self.send({"data": rows, "oldest": rows[-1]["time"] if rows else ""})
+        elif u.path == "/control/filtering/status":
+            self.send({"user_rules": self.rules, "whitelist_filters": [],
+                       "filters": [{"id": 1, "name": "AdGuard DNS filter"}]})
+        elif u.path == "/control/filtering/check_host":
+            name = q.get("name", "")
+            hit = [r for r in Fake.rules if r.strip("@|^") and (name == r.strip("@|^") or name.endswith("." + r.strip("@|^")))]
+            reason = ("NotFilteredWhiteList" if hit[0].startswith("@@") else "FilteredBlackList") if hit else "NotFilteredNotFound"
+            self.send({"reason": reason, "rules": [{"text": r, "filter_list_id": 0} for r in hit]})
+        else:
+            self.send({"version": "v0.107.79", "running": True})
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        if self.path == "/control/filtering/set_rules":
+            Fake.rules = body.get("rules") or []
+        self.send({}, headers=[("Set-Cookie", "agh_session=fake; Path=/")] if self.path == "/control/login" else ())
+
+
+# ---------- terminal ----------
+
+def render(screen, path):
+    font = ImageFont.truetype(FONT, 16)
+    cw = round(font.getlength("M"))
+    ch = 20
+    img = Image.new("RGB", (cw * screen.columns + 16, ch * screen.lines + 16), BG)
+    d = ImageDraw.Draw(img)
+    for y in range(screen.lines):
+        row = screen.buffer[y]
+        for x in range(screen.columns):
+            c = row[x]
+            fg = COLORS.get(c.fg, "#" + c.fg if len(c.fg) == 6 else None) or FG
+            bg = COLORS.get(c.bg, "#" + c.bg if len(c.bg) == 6 else None) or BG
+            if c.reverse:
+                fg, bg = bg, fg
+            px, py = 8 + x * cw, 8 + y * ch
+            if bg != BG:
+                d.rectangle([px, py, px + cw - 1, py + ch - 1], fill=bg)
+            if c.data.strip():
+                d.text((px, py + 1), c.data, font=font, fill=fg)
+    img.save(path)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("out")
+    p.add_argument("keys", nargs="*")
+    p.add_argument("--app", default=os.path.join(ROOT, "adguard-manager"))
+    p.add_argument("--size", default="120x34")
+    a = p.parse_args()
+    cols, rows = map(int, a.size.split("x"))
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fake)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    conf = tempfile.mkdtemp()
+    with open(os.path.join(conf, "adguard-manager.json"), "w") as f:
+        json.dump({"url": "http://127.0.0.1:%d" % srv.server_port, "cookie": "agh_session=fake"}, f)
+
+    curses.setupterm(TERM, sys.stdout.fileno())  # key sequences as the app's curses expects them
+    screen = pyte.Screen(cols, rows)
+    stream = pyte.ByteStream(screen)
+    pid, fd = pty.fork()
+    if pid == 0:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        # pyte skips the DEC line-drawing charset in UTF-8 mode, so have ncurses draw boxes in Unicode
+        os.environ.update(TERM=TERM, XDG_CONFIG_HOME=conf, LC_ALL="C.UTF-8", NCURSES_NO_UTF8_ACS="1")
+        os.execvp(sys.executable, [sys.executable, a.app])
+
+    def pump(secs):
+        end = time.time() + secs
+        while time.time() < end:
+            if select.select([fd], [], [], 0.05)[0]:
+                try:
+                    stream.feed(os.read(fd, 65536))
+                except OSError:
+                    return
+
+    pump(3)  # the first fetch starts on the first idle tick
+    for k in a.keys:
+        if k.startswith("wait:"):
+            pump(float(k[5:]))
+            continue
+        os.write(fd, curses.tigetstr(TI[k]) if k in TI else OTHER.get(k, k).encode())
+        pump(0.4)
+    pump(0.5)
+    render(screen, a.out)
+    print("\n".join(screen.display))
+    os.kill(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+
+
+if __name__ == "__main__":
+    main()
