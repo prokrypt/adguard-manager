@@ -3,7 +3,7 @@
 
 Keys are function keys: F2 custom rules manager, F3 filter by client, F4 ignore a domain
 (on a greyed row: un-ignore; the ignored list is the last item of its menu), F5 refresh,
-F6 block/unblock (or block the answer IPs), F7 show/hide ignored queries, F8 auto-refresh interval, F9 log out, F10 or Ctrl+Q quit.
+F6 block/unblock (or block the answer IPs, or remove the custom rule that blocked it), F7 show/hide ignored queries, F8 auto-refresh interval, F9 log out, F10 or Ctrl+Q quit.
 Typing filters the list (domain, client name or IP); Esc clears it.
 The session cookie (never the password), the ignore list and the client
 filter are kept in ~/.config/adguard-manager.json, mode 600. That file is written
@@ -1008,19 +1008,27 @@ class LogView:
         name = qname(cur)
         unblock = verdict(cur)[0] == "BLOCK"
         opts = levels(name)
+        rules = self.api.user_rules()
+        # Unblock offers first to remove the custom rules that blocked this row.
+        mine = [t for t in dict.fromkeys(r.get("text", "") for r in cur.get("rules") or [])
+                if unblock and not t.startswith("@@") and t in (r.strip() for r in rules)]
         ips = [] if unblock else [a["value"] for a in cur.get("answer") or [] if a.get("type") in ("A", "AAAA")]
-        i = choose(self.scr, "Unblock" if unblock else "Block", [f"{d} and its subdomains" for d in opts] +
-                   ([f"Its answer IPs: {', '.join(ips)}"] if ips else []))
-        if i == len(opts):
-            return self.block_ips(cur, ips)
-        d = None if i is None else opts[i]
-        if not d:
+        i = choose(self.scr, "Unblock" if unblock else "Block", [f"Remove {t}" for t in mine] +
+                   [f"{d} and its subdomains" for d in opts] + ([f"Its answer IPs: {', '.join(ips)}"] if ips else []))
+        if i is None:
             return
+        if i == len(mine) + len(opts):
+            return self.block_ips(cur, ips)
+        ops = []
+        if i < len(mine):
+            at = next(j for j, r in enumerate(rules) if r.strip() == mine[i])
+            ops.append(("del", rules.pop(at), at))
+            self.api.set_user_rules(rules)
+            return self.f6_done(cur, name, ops)
+        d = opts[i - len(mine)]
         block, allow = f"||{d}^", f"@@||{d}^"
         # First drop our own opposite rule; only if AdGuard still disagrees, add a new one.
         drop, add = (block, allow) if unblock else (allow, block)
-        rules = self.api.user_rules()
-        ops = []
         need_add = True
         if drop in (r.strip() for r in rules):
             i = next(i for i, r in enumerate(rules) if r.strip() == drop)
@@ -1037,6 +1045,10 @@ class LogView:
         if not ops:
             self.msg = f"No change: {add} is already there"
             return
+        self.f6_done(cur, name, ops)
+
+    def f6_done(self, cur, name, ops):
+        """Show AdGuard's new verdict on the row and keep ops for F6 undo."""
         check = self.api.check_host(name)
         for key in ("reason", "rules", "service_name"):
             cur.setdefault("was_" + key, cur.get(key, "" if key != "rules" else []))
