@@ -6,6 +6,7 @@ Notes for making changes. User-facing docs are in README.md.
 
 - One executable file, `adguard-manager` (no `.py`), Python 3.9+, stdlib only. Keep it that way: no deps, no package split.
 - No tests, no CI. Check with `python3 -m py_compile adguard-manager` and a manual run against AdGuard Home (tested on v0.107.79).
+- Screenshots: `tools/screenshot out.png [KEY ...]` runs the app in a pty against a fake AdGuard Home with sample data and saves a PNG (also prints the screen as text). Keys: `F2`, `Down`, `Enter`, `Esc`, `wait:2`, or text to type. Before shot: `git fetch origin main && git show origin/main:adguard-manager > /tmp/old && tools/screenshot --app /tmp/old before.png ...`. Needs `python3 -m pip install pyte pillow` (the tool only; the app stays stdlib). UI-changing PRs attach before/after shots.
 - PRs are squash-merged with a short plain-English title, e.g. `Ctrl+Q quits like F10 (#6)`.
 
 ## Map (top to bottom)
