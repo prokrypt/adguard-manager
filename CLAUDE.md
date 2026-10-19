@@ -37,7 +37,7 @@ Notes for making changes. User-facing docs are in README.md.
 ## LogView data flow (the tricky part)
 
 - `cache[search] -> entries`, newest first. `search` is the client IP while filtering by client (the server search also matches domains, so `apply()` filters on the exact IP too), else `""`. `all` = `cache[search]`.
-- `apply(keep, jump)` rebuilds `rows` from `all`: client filter, ignore list (`covers`), typed filter. Call it after anything that changes `all`, `ignore`, `typed` or `client`.
+- `apply(keep, jump)` rebuilds `rows` from `all`: client filter, ignore list (`ignored()`, skipped while `show_ign`), typed filter. Call it after anything that changes `all`, `ignore`, `show_ign`, `typed` or `client`.
 - Loading: `got_first` (20 rows) -> `got_more` pages of 100 until `LOG_LIMIT`, with `more[search]` holding the `older_than` cursor. `refresh()`/`fetch_new` go backwards from newest and stop at the first known `key()`; if the gap is more than `KEEP` the list is replaced.
 - Background: `wait_ms()` sets the `get_wch` timeout, and on timeout `idle()` either starts one job via `in_thread` or collects it. `self.job = (kind, search, base list, Future)`. The result is thrown away if the view switched or the list object changed (`is not base`), so a manual F5 always wins.
 - F-key actions (F5, F6, rules) make network calls on the main thread and block. Only idle fetches run in a thread. A view that blocks for long (`RulesView.run`) calls `scr.timeout(-1)`, and `LogView.run` resets it on exit for the login form.
@@ -49,7 +49,7 @@ Notes for making changes. User-facing docs are in README.md.
 
 - `LogView.draw`: header row, list (`body` rows), `─ Details ─` pane (`DETAIL_ROWS`, grows for wrapped text, dropped when the screen is too short), footer on the last line. The client column width fits the visible names, capped at `CLIENT_MAX`.
 - `addstr` drops the last cell of the bottom row (curses errors writing the bottom-right corner). Always draw through it, never `win.addstr` directly.
-- Colors: pair 1 red (BLOCK/errors), 2 green (ALLOW, `@@` rules), 3 cyan (REWR); default background.
+- Colors: pair 1 red (BLOCK/errors), 2 green (ALLOW, `@@` rules), 3 cyan (REWR), 4 grey (ignored rows, shown with F7); default background.
 
 ## Disk/network goals (keep them)
 

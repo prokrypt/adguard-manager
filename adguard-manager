@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """adguard-manager: curses front end for the AdGuard Home query log.
 
-Keys are function keys: F2 custom rules manager, F3 filter by client, F4 ignore a domain, F5 refresh,
-F6 block/unblock, F7 ignored list, F8 auto-refresh interval, F9 log out, F10 or Ctrl+Q quit.
+Keys are function keys: F2 custom rules manager, F3 filter by client, F4 ignore a domain (on a greyed row:
+ignored list), F5 refresh, F6 block/unblock, F7 show/hide ignored queries, F8 auto-refresh interval, F9 log out, F10 or Ctrl+Q quit.
 Typing filters the list (domain, client name or IP); Esc clears it.
 The session cookie (never the password), the ignore list and the client
 filter are kept in ~/.config/adguard-manager.json, mode 600. That file is written
@@ -681,6 +681,7 @@ class LogView:
         # (ip, label) while filtering by client; remembered in conf, saved on exit
         self.client = tuple(conf["client"]) if conf.get("client") else None
         self.typed = ""     # type-to-filter text: matches domain, client name or IP
+        self.show_ign = False  # F7: show ignored queries greyed out instead of hiding them
         self.body = 1       # list rows on screen, set by draw()
         self.pad = PAD      # 0 for one draw after a click, so the clicked row stays put
         self.job = None     # (kind, search, list it extends, Future) while a background fetch runs
@@ -702,6 +703,9 @@ class LogView:
     def ignore(self):
         return self.conf.setdefault("ignore", [])
 
+    def ignored(self, e):
+        return any(covers(d, qname(e)) for d in self.ignore)
+
     def type_key(self, k):
         """Type-to-filter in the main list; returns False if k isn't a typing key."""
         if k in (curses.KEY_BACKSPACE, "\x7f", "\b"):
@@ -718,8 +722,9 @@ class LogView:
     def keys(self):
         cur = self.current()
         block = "Unblock" if cur and verdict(cur)[0] == "BLOCK" else "Block"
-        return [("F2", "Rules"), ("F3", "All clients" if self.client else "Client"), ("F4", "Ignore"),
-                ("F5", "Refresh"), ("F6", block), ("F7", "Ignored"),
+        return [("F2", "Rules"), ("F3", "All clients" if self.client else "Client"),
+                ("F4", "Ignored" if cur and self.ignored(cur) else "Ignore"),
+                ("F5", "Refresh"), ("F6", block), ("F7", "Hide ign" if self.show_ign else "Show ign"),
                 ("F8", f"Auto {self.auto}s" if self.auto else "Auto off"), ("F9", "Logout"), ("F10", "Quit")]
 
     def current(self):
@@ -738,7 +743,7 @@ class LogView:
         old = len(self.rows)
         self.rows = [e for e in self.all
                      if (ip is None or e.get("client") == ip)
-                     and not any(covers(d, qname(e)) for d in self.ignore)
+                     and (self.show_ign or not self.ignored(e))
                      and (not self.typed or self.matches(e))]
         if jump:
             self.sel = self.rows.index(keep) if keep is not None and keep in self.rows else 0
@@ -750,7 +755,7 @@ class LogView:
         elif keep is None and old == 0:
             self.sel = self.top = 0
         self.sel = min(self.sel, max(0, len(self.rows) - 1))
-        hidden = sum(1 for e in self.all if any(covers(d, qname(e)) for d in self.ignore))
+        hidden = sum(1 for e in self.all if self.ignored(e))
         self.msg = f"{len(self.rows)} shown" + (f", {hidden} ignored" if hidden else "")
 
     def refresh(self):
@@ -870,7 +875,7 @@ class LogView:
             label, color = verdict(e)
             line = (f"{e.get('time', '')[11:19]:8} {clip(client_name(e), cw):{cw}} "
                     f"{q.get('type', '')[:5]:5} {label:6} {q.get('name', '')}")
-            attr = curses.color_pair(color)
+            attr = curses.color_pair(4) | curses.A_DIM if self.ignored(e) else curses.color_pair(color)
             if self.top + i == self.sel:
                 attr |= curses.A_REVERSE
             addstr(scr, 1 + i, 0, line.ljust(w), attr)
@@ -954,11 +959,17 @@ class LogView:
         cur = self.current()
         if not cur:
             return
+        if self.ignored(cur):
+            return self.edit_ignored()
         d = self.pick_level("Ignore", qname(cur), " and its subdomains")
         if d and d not in self.ignore:
             self.ignore.append(d)
             self.apply(self.current())
             self.msg = f"Ignoring {d}; " + self.msg
+
+    def toggle_ignored(self):
+        self.show_ign = not self.show_ign
+        self.apply(self.current(), jump=True)
 
     def edit_ignored(self):
         while self.ignore:
@@ -1050,7 +1061,7 @@ class LogView:
             self.msg = str(e)
         actions = {curses.KEY_F2: self.rules_view, curses.KEY_F3: self.pick_client, curses.KEY_F4: self.ignore_current,
                    curses.KEY_F5: self.refresh, curses.KEY_F6: self.toggle_block,
-                   curses.KEY_F7: self.edit_ignored, curses.KEY_F8: self.cycle_auto}
+                   curses.KEY_F7: self.toggle_ignored, curses.KEY_F8: self.cycle_auto}
         while True:
             self.draw()
             self.scr.timeout(self.wait_ms())
@@ -1100,6 +1111,7 @@ def main(scr):
     curses.init_pair(1, curses.COLOR_RED, -1)
     curses.init_pair(2, curses.COLOR_GREEN, -1)
     curses.init_pair(3, curses.COLOR_CYAN, -1)
+    curses.init_pair(4, 8 if curses.COLORS >= 16 else -1, -1)  # grey (bright black) where available
     curses.curs_set(0)
     curses.mousemask(curses.ALL_MOUSE_EVENTS)  # Shift+drag still selects text in most terminals
     # Turn off XON/XOFF so Ctrl+Q reaches us; curses.wrapper restores the tty on exit.

@@ -15,7 +15,7 @@ Time     Client               Type  Status Domain
      Rule ||ads.example.com^  [AdGuard DNS filter]
  Response NOERROR: A 0.0.0.0 ttl 10s
  Upstream none  0.4ms
-F2Rules F3Client F4Ignore F5Refresh F6Unblock F7Ignored F8Auto 5s F9Logout F10Quit
+F2Rules F3Client F4Ignore F5Refresh F6Unblock F7Show ign F8Auto 5s F9Logout F10Quit
 ```
 
 ## Install
@@ -35,10 +35,10 @@ All commands are on function keys, so typing always filters.
 |-----|-----------|-------------------|
 | F2  | open the custom rules manager | back |
 | F3  | show one client (pick from a list) / all clients | |
-| F4  | ignore a domain or subdomain (hide it in the list) | edit rule |
+| F4  | ignore a domain or subdomain (hide it in the list); on a greyed (ignored) row: list of ignored domains (Enter removes) | edit rule |
 | F5  | refresh | reload |
 | F6  | block / unblock the selected query; again = undo | |
-| F7  | list of ignored domains (Enter removes) | add rule (at the end) |
+| F7  | show / hide ignored queries (greyed out; hidden at start) | add rule (at the end) |
 | F8  | auto-refresh interval: 5s, 10s, 30s, off | delete rule (asks first) |
 | F9  | log out (asks first) | |
 | F10 / Ctrl+Q | quit | back |
