@@ -130,6 +130,7 @@ def sample_log(n=60):
 class Fake(http.server.BaseHTTPRequestHandler):
     log = sample_log()
     rules = ["@@||cdn.jsdelivr.net^", "||doubleclick.net^", "# local", "||telemetry.tv-vendor.example^"]
+    slow = 0  # --slow: seconds before each answer
 
     def log_message(self, *a):
         pass
@@ -145,6 +146,7 @@ class Fake(http.server.BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_GET(self):
+        time.sleep(Fake.slow)
         u = urllib.parse.urlparse(self.path)
         q = dict(urllib.parse.parse_qsl(u.query))
         if u.path == "/control/querylog":
@@ -165,6 +167,7 @@ class Fake(http.server.BaseHTTPRequestHandler):
             self.send({"version": "v0.107.79", "running": True})
 
     def do_POST(self):
+        time.sleep(Fake.slow)
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
         if self.path == "/control/filtering/set_rules":
             Fake.rules = body.get("rules") or []
@@ -203,7 +206,9 @@ def main():
     p.add_argument("--app", default=os.path.join(ROOT, "adguard-manager"))
     p.add_argument("--size", default="120x34")
     p.add_argument("--new-every", type=float, metavar="SECS", help="add a query to the log every SECS seconds (shows refreshes)")
+    p.add_argument("--slow", type=float, default=0, metavar="SECS", help="the fake server takes SECS seconds to answer each request")
     a = p.parse_args()
+    Fake.slow = a.slow
     cols, rows = map(int, a.size.split("x"))
 
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fake)
