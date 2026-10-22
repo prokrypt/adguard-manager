@@ -7,7 +7,8 @@ F6 block/unblock (or block the answer IPs or CNAMEs, or remove the custom rule t
 Typing filters the list (domain, client name or IP); Esc clears it.
 On the selected row, clicking the client filters by it and clicking a domain label
 picks it and its parent domains for F4/F6. Keys: Right picks the domain (again: shorter),
-Left a longer part or the client, Enter acts on the pick, or with no pick asks block or ignore.
+Left a longer part or the client (Left on a picked client while filtering by client shows all
+clients again), Enter acts on the pick, or with no pick asks block or ignore.
 The session cookie (never the password), the ignore list and the client
 filter are kept in ~/.config/adguard-manager.json, mode 600. That file is written
 at login, and on exit if the ignore list or client filter changed or you
@@ -50,6 +51,7 @@ class Api:
     def __init__(self, url, cookie=None):
         self.url = url.rstrip("/")
         self.cookie = cookie
+        self.waiting = None  # called before a request made on the main thread (the UI shows it)
 
     def request(self, path, data=None):
         body = None if data is None else json.dumps(data).encode()
@@ -58,6 +60,8 @@ class Api:
             req.add_header("Content-Type", "application/json")
         if self.cookie:
             req.add_header("Cookie", self.cookie)
+        if self.waiting and threading.current_thread() is threading.main_thread():
+            self.waiting()
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
                 raw = resp.read()
@@ -308,6 +312,7 @@ def authenticate(scr, conf):
     """Make sure we hold a working session; returns an Api or None (quit)."""
     api = Api(conf.get("url", DEFAULT_URL), conf.get("cookie"))
     name = error = ""
+    message(scr, f"Connecting to {api.url}…")
     try:
         api.status()
         return api
@@ -745,12 +750,15 @@ class LogView:
         self.show_ign = False  # F7: show ignored queries greyed out instead of hiding them
         self.body = 1       # list rows on screen, set by draw()
         self.pad = PAD      # 0 for one draw after a click, so the clicked row stays put
-        self.job = None     # (kind, search, list it extends, Future) while a background fetch runs
+        self.job = None     # (kind, search, list it extends, Future, start time) while a background fetch runs
+        self.asked = False  # F5 or a filter switch wants new entries; idle() fetches them first
+        self.lists_job = None  # Future for the filter list names, loaded once in the background
         self.lists = {}     # filter list id -> name, for the details pane
         self.more = {}      # search string -> older_than cursor while the first load continues
         self.auto = AUTO[0]
         self.last = 0.0     # time of the last refresh
         self.cache = {}     # search string -> entries, so switching views only fetches the gap
+        api.waiting = self.busy
 
     @property
     def search(self):
@@ -833,13 +841,18 @@ class LogView:
         self.msg = f"{len(self.rows)} shown" + (f", {hidden} ignored" if hidden else "")
 
     def refresh(self):
-        self.last = time.monotonic()
-        if not self.all:
-            self.got_first(*self.api.querylog(FIRST_PAGES[0], self.search))
-            return
-        self.msg = "Loading…"
-        self.draw()
-        self.got_new(*fetch_new(self.api, self.search, self.all))
+        """F5 and filter switches: show what is cached now, fetch the rest in the background."""
+        self.apply(self.current())
+        if self.job and self.job[1] != self.search:
+            self.job = None  # a fetch for the view we left: its thread ends on its own, unseen
+        self.asked = True
+
+    def busy(self):
+        """Before a blocking request (F6, rules, logout): say so, as the screen can't change meanwhile."""
+        h, w = self.scr.getmaxyx()
+        text = f" Waiting for {self.api.url}… "
+        addstr(self.scr, h - 1, max(0, w - len(text) - 1), text, curses.A_BOLD | curses.A_REVERSE)
+        self.scr.refresh()
 
     def got_new(self, new, complete, auto=False):
         keep, msg = self.current(), self.msg
@@ -870,35 +883,50 @@ class LogView:
         if not done:
             self.msg = f"loading {len(rows)}/{LOG_LIMIT}… " + self.msg
 
+    def due(self):
+        return self.asked or bool(self.more.get(self.search)) or \
+            bool(self.auto) and time.monotonic() >= self.last + self.auto
+
     def wait_ms(self):
-        """How long the key wait may block before idle() runs."""
-        if self.job:
+        """How long the key wait may block before the loop comes round to idle() again."""
+        if self.job or self.lists_job:
             return 50  # poll for the background fetch
-        if self.more.get(self.search):
+        if self.due():
             return 0
         if not self.auto:
             return -1
         return max(0, int((self.last + self.auto - time.monotonic()) * 1000))
 
     def idle(self):
-        """No key came: start the due fetch in a thread, so keys keep working while it waits
-        on the network, or take in its result once it is done."""
+        """Runs before every draw, key or not: takes in a finished background fetch, or starts
+        the due one in a thread, so keys keep working while it waits on the network."""
+        if self.lists_job and self.lists_job.done():
+            try:
+                self.lists = self.lists_job.result()
+            except RuntimeError:
+                pass  # rule list names are only labels in the details pane
+            self.lists_job = None
         if not self.job:
+            if not self.due():
+                return
             search = self.search
-            if self.more.get(search):
-                kind, fn, args = "more", self.api.querylog, (FIRST_PAGES[-1], search, self.more[search])
-            else:
+            if self.asked or not self.more.get(search):  # new entries first, older pages after
                 self.last = time.monotonic()
                 kind, fn, args = (("new", fetch_new, (self.api, search, self.all)) if self.all else
                                   ("first", self.api.querylog, (FIRST_PAGES[0], search)))
-            self.job = (kind, search, self.cache.get(search), in_thread(fn, *args))
+            else:
+                kind, fn, args = "more", self.api.querylog, (FIRST_PAGES[-1], search, self.more[search])
+            self.job = (kind, search, self.cache.get(search), in_thread(fn, *args), time.monotonic())
             return
-        kind, search, base, fut = self.job
+        kind, search, base, fut, _ = self.job
         if not fut.done():
             return
         self.job = None
         if search != self.search or self.cache.get(search) is not base:
-            return  # F5 or a client switch replaced the list meanwhile; fetch again later
+            return  # a client switch or new rows replaced the list meanwhile; fetch again later
+        manual = self.asked and kind != "more"
+        if manual:
+            self.asked = False
         try:
             got = fut.result()
         except RuntimeError as e:
@@ -912,7 +940,17 @@ class LogView:
         elif kind == "first":
             self.got_first(*got)
         else:
-            self.got_new(*got, auto=True)
+            self.got_new(*got, auto=not manual)
+
+    def status(self):
+        """Footer message, with how long the server has been keeping us waiting."""
+        if not self.job:
+            return self.msg
+        t = time.monotonic() - self.job[4]
+        if t < 1 and not (self.asked or self.job[0] == "first"):
+            return self.msg  # quick background fetches don't flicker the footer
+        wait = "Loading…" if t < 2 else f"Waiting for the server {t:.0f}s…"
+        return wait + ("; " + self.msg if self.msg else "")
 
     def cycle_auto(self):
         self.auto = AUTO[(AUTO.index(self.auto) + 1) % len(AUTO)]
@@ -981,7 +1019,7 @@ class LogView:
             for i, (label, text, attr) in enumerate(lines[: dh - 1]):
                 addstr(scr, 2 + body + i, 0, f"{label:>9} ", curses.A_DIM)
                 addstr(scr, 2 + body + i, 10, text, attr)
-        footer(scr, self.keys(), self.msg)
+        footer(scr, self.keys(), self.status())
         scr.refresh()
 
     def details(self, e):
@@ -1021,9 +1059,12 @@ class LogView:
 
     def pick_client(self):
         if self.client:
+            cur = self.current()
             self.client = None
             self.conf.pop("client", None)
-            self.rows, self.sel, self.top = [], 0, 0
+            # Stay on the same query in the full log (its own dict there if it was fetched twice).
+            keep = next((e for e in self.all if key(e) == key(cur)), None) if cur else None
+            self.apply(keep, jump=True)
             self.refresh()
             return
         counts = {}
@@ -1043,7 +1084,7 @@ class LogView:
 
     def row_key(self, k):
         """Right picks the whole domain and then shorter parts of it, Left longer ones and then the
-        client; Enter acts on the pick (filter by the client, or the block/ignore menu).
+        client, and Left again leaves the client filter; Enter acts on the pick (filter by the client, or the block/ignore menu).
         Returns an F key to run, or None."""
         cur = self.current()
         if not cur or not qname(cur):
@@ -1052,6 +1093,8 @@ class LogView:
         d = self.part[1] if self.part else None
         if k == curses.KEY_LEFT and d in opts[1:]:  # a partial pick grows back one level
             self.part = (cur, opts[opts.index(d) - 1])
+        elif k == curses.KEY_LEFT and self.on_client and self.client:
+            return curses.KEY_F3  # back to all clients
         elif k == curses.KEY_LEFT:
             self.part, self.on_client = None, cur
         elif k == curses.KEY_RIGHT:
@@ -1242,21 +1285,18 @@ class LogView:
             self.scr.timeout(-1)  # the login form expects blocking reads
 
     def loop(self):
-        try:
-            self.lists = self.api.filter_names()
-            self.refresh()
-        except RuntimeError as e:
-            self.msg = str(e)
+        self.lists_job = in_thread(self.api.filter_names)
+        self.refresh()
         actions = {curses.KEY_F2: self.rules_view, curses.KEY_F3: self.pick_client, curses.KEY_F4: self.ignore_current,
                    curses.KEY_F5: self.refresh, curses.KEY_F6: self.toggle_block,
                    curses.KEY_F7: self.toggle_ignored, curses.KEY_F8: self.cycle_auto}
         while True:
+            self.idle()  # every pass, so a held key doesn't hold back the fetches
             self.draw()
             self.scr.timeout(self.wait_ms())
             try:
                 k = self.scr.get_wch()
             except curses.error:  # no key before the timeout
-                self.idle()
                 continue
             if k == curses.KEY_MOUSE:
                 k, y, x = mouse(self.scr, self.keys())
