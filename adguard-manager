@@ -187,6 +187,13 @@ def scroll(top, sel, body, n, pad=PAD):
     return max(0, min(top, n - body))
 
 
+def more_marks(win, y, x, top, shown, n, sel):
+    """▲ at x on the first list row when rows are hidden above, ▼ on the last when hidden below."""
+    for row, mark, hidden in ((0, "▲", top > 0), (shown - 1, "▼", top + shown < n)):
+        if hidden and shown:
+            addstr(win, y + row, x, mark, curses.A_REVERSE if top + row == sel else curses.A_DIM)
+
+
 def in_thread(fn, *args):
     """Run fn(*args) in a daemon thread (quitting never waits on it); returns a Future."""
     fut = concurrent.futures.Future()
@@ -381,6 +388,7 @@ def _choose(scr, title, items, hint):
         for row, i in enumerate(shown[top: top + body]):
             attr = curses.A_REVERSE if top + row == sel else 0
             addstr(win, 2 + row, 2, items[i][: bw - 4].ljust(bw - 4), attr)
+        more_marks(win, 2, bw - 3, top, len(shown[top: top + body]), len(shown), sel)
         win.refresh()
         k = win.get_wch()
         if k == curses.KEY_MOUSE:
@@ -517,6 +525,7 @@ class RulesView:
             if self.top + row == self.sel:
                 attr |= curses.A_REVERSE
             addstr(scr, 1 + row, 0, f"{i + 1:>5}  {r}".ljust(w), attr)
+        more_marks(scr, 1, w - 1, self.top, len(self.rows[self.top: self.top + body]), len(self.rows), self.sel)
         footer(scr, self.KEYS, self.msg)
         scr.refresh()
 
@@ -1014,6 +1023,7 @@ class LogView:
             if self.top + i == self.sel:
                 for bx, label, _ in row_buttons(e, w):
                     addstr(scr, 1 + i, bx, label, curses.color_pair(color) | curses.A_BOLD)
+        more_marks(scr, 1, w - 1, self.top, len(self.rows[self.top: self.top + body]), len(self.rows), self.sel)
         if dh:
             addstr(scr, 1 + body, 0, " Details ".center(w, "─"), curses.A_BOLD)
             for i, (label, text, attr) in enumerate(lines[: dh - 1]):
