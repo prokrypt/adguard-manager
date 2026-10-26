@@ -15,7 +15,7 @@ Notes for making changes. User-facing docs are in README.md.
 |------|------|
 | constants | `LOG_LIMIT`, `FIRST_PAGES`, `PAGES`, `KEEP`, `AUTO`, `PAD`, `CLIENT_MAX`, `DETAIL_ROWS`: all tuning lives here |
 | `Api` | thin urllib wrapper over `/control/*`. `request()` maps 401/403 to `AuthError`, everything else (HTTP, URL, timeout, 429) to `RuntimeError` |
-| `load_conf`/`save_conf` | JSON at `$XDG_CONFIG_HOME/adguard-manager.json`, mode 600 (an old `adguard-manager` file is renamed on load until 2026-10-26; then drop `OLD_CONF`). Keys: `url`, `cookie`, `ignore`, `client` |
+| `load_conf`/`save_conf` | JSON at `$XDG_CONFIG_HOME/adguard-manager.json`, mode 600. Keys: `url`, `cookie`, `ignore`, `client` |
 | curses helpers | `addstr` (clips, never raises), `footer`/`footer_layout`, `scroll`, `more_marks` (▲/▼ on the first/last list row when more is hidden), `in_thread`, `mouse`, `Field` |
 | popups | `login_form`, `choose` (filterable list), `ask` (one-line input), `confirm` |
 | `RulesView` | F2 screen: custom rules list; edit/add/delete change `rules` locally and log `ops`; Back (`leave()`) asks, then `submit()` |

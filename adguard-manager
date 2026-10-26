@@ -29,7 +29,6 @@ import urllib.request
 
 CONF_DIR = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
 CONF = os.path.join(CONF_DIR, "adguard-manager.json")
-OLD_CONF = os.path.join(CONF_DIR, "adguard-manager")  # transition: remove after 2026-10-26
 DEFAULT_URL = "http://adguard.lan"
 COOKIE_NAME = "agh_session"
 TIMEOUT = 10
@@ -128,8 +127,6 @@ class Api:
 
 def load_conf():
     try:
-        if os.path.isfile(OLD_CONF) and not os.path.exists(CONF):
-            os.rename(OLD_CONF, CONF)  # transition: remove after 2026-10-26
         with open(CONF) as f:
             return json.load(f)
     except (OSError, ValueError):
